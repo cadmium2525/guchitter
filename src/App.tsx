@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { liveQuery } from 'dexie';
 import { useRegisterSW } from 'virtual:pwa-register/react';
-import { ArrowDownWideNarrow, ArrowUpRight, Check, CheckCheck, ChevronRight, Download, Flame, Hash, Home, Leaf, LockKeyhole, Monitor, Moon, MoreHorizontal, Pencil, Plus, Search, Settings, ShieldCheck, Sun, Trash2, Trophy, WifiOff, X } from 'lucide-react';
+import { ArrowDownWideNarrow, ArrowUpRight, Check, ChevronRight, Download, Flame, Hash, Home, Leaf, LockKeyhole, Monitor, Moon, MoreHorizontal, Pencil, Plus, Search, Settings, ShieldCheck, Sun, Trash2, Trophy, WifiOff, X } from 'lucide-react';
 import { compareAnger, createPost, db, deletePost, incrementAnger, incrementPostAnger, normalizeTag, totalAnger, updatePost, type Post } from './data';
 import { createTimelineSeed, orderTimeline, type TimelineMode } from './data/timeline';
+import { getTagUsage, hasBodyTag } from './data/tags';
 
 type Page = 'timeline' | 'search' | 'ranking' | 'settings';
 type Theme = 'light' | 'dark' | 'system';
@@ -47,10 +48,10 @@ function SteamArt({ quiet = false }: { quiet?: boolean }) {
   </svg>;
 }
 
-function Dialog({ title, children, onClose, className = '', action, closeDisabled = false }: { title: string; children: ReactNode; onClose(): void; className?: string; action?: ReactNode; closeDisabled?: boolean }) {
+function Dialog({ title, children, onClose, onEscape, className = '', action, closeDisabled = false }: { title: string; children: ReactNode; onClose(): void; onEscape?(): void; className?: string; action?: ReactNode; closeDisabled?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => { const dialog = ref.current; dialog?.showModal(); return () => { dialog?.close(); }; }, []);
-  return <dialog ref={ref} className={`dialog ${className}`} onCancel={event => { event.preventDefault(); onClose(); }} aria-labelledby="dialog-title"><div className="dialog-head"><h2 id="dialog-title">{title}</h2><button className="icon-button" onClick={onClose} aria-label="閉じる" disabled={closeDisabled}><X size={21} /></button>{action}</div>{children}</dialog>;
+  return <dialog ref={ref} className={`dialog ${className}`} onCancel={event => { event.preventDefault(); (onEscape ?? onClose)(); }} aria-labelledby="dialog-title"><div className="dialog-head"><h2 id="dialog-title">{title}</h2><button className="icon-button" onClick={onClose} aria-label="閉じる" disabled={closeDisabled}><X size={21} /></button>{action}</div>{children}</dialog>;
 }
 
 function PostCard({ post, rank, onTag, onEdit, onDelete, onError }: { post: Post; rank?: number; onTag(tag: string): void; onEdit(post: Post): void; onDelete(post: Post): void; onError(message: string): void }) {
@@ -72,7 +73,7 @@ function PostCard({ post, rank, onTag, onEdit, onDelete, onError }: { post: Post
       <div className="post-head"><span className="post-author">わたし</span><span className="post-private"><LockKeyhole size={11} /> 自分だけ</span><span className="time-dot">·</span><time dateTime={new Date(post.createdAt).toISOString()} title={new Date(post.createdAt).toLocaleString('ja-JP')}>{timeLabel(post.createdAt)}</time><div className="post-menu" ref={menuRef}><button className="icon-button" aria-label="投稿のメニュー" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><MoreHorizontal size={20} /></button>{menuOpen && <div className="dropdown"><button onClick={() => { setMenuOpen(false); onEdit(post); }}><Pencil size={16} />編集</button><button className="danger-text" onClick={() => { setMenuOpen(false); onDelete(post); }}><Trash2 size={16} />削除</button></div>}</div></div>
       <p className="post-body">{post.body}</p>
       {post.tags.length > 0 && <div className="post-tags">{post.tags.map(tag => <button key={normalizeTag(tag)} onClick={() => onTag(tag)}>#{tag}</button>)}</div>}
-      <div className="post-footer"><button className={`anger-button ${post.angerCount !== '0' ? 'has-anger' : ''}`} aria-label="イライラを1増やす" onClick={tap}><span key={pulse} className={pulse ? 'flame-pop' : ''}><Flame size={19} fill={post.angerCount !== '0' ? 'currentColor' : 'none'} /></span><span className="anger-value">{numberLabel(post.angerCount)}</span><span className="tap-hint">わかる、あのイライラ</span></button><span className="post-saved"><CheckCheck size={14} />端末に保存済み{post.updatedAt !== post.createdAt && <span className="edited-label"> · 更新あり</span>}</span></div>
+      <div className="post-footer"><button className={`anger-button ${post.angerCount !== '0' ? 'has-anger' : ''}`} aria-label="イライラを1増やす" onClick={tap}><span key={pulse} className={pulse ? 'flame-pop' : ''}><Flame size={19} fill={post.angerCount !== '0' ? 'currentColor' : 'none'} /></span><span className="anger-value">{numberLabel(post.angerCount)}</span><span className="tap-hint">わかる、あのイライラ</span></button></div>
     </div>
   </article>;
 }
@@ -86,6 +87,8 @@ export default function App() {
   const [body, setBody] = useState('');
   const [initialAnger, setInitialAnger] = useState('0');
   const [composerOpen, setComposerOpen] = useState(false);
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const [tagQuery, setTagQuery] = useState('');
   const [composeError, setComposeError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<{ message: string; error: boolean }>();
@@ -103,6 +106,8 @@ export default function App() {
   const [persistent, setPersistent] = useState<boolean | undefined>();
   const [persistenceBusy, setPersistenceBusy] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const tagButtonRef = useRef<HTMLButtonElement>(null);
+  const draftSelection = useRef({ start: 0, end: 0 });
   const editRef = useRef<HTMLTextAreaElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const allPosts = posts ?? [];
@@ -131,7 +136,14 @@ export default function App() {
     return () => { window.removeEventListener('beforeinstallprompt', install); window.removeEventListener('appinstalled', installed); };
   }, []);
   useEffect(() => { if (!dirty) return; const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; }; window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn); }, [dirty]);
-  useEffect(() => { if (composerOpen && !composerDisabled) textareaRef.current?.focus({ preventScroll: true }); }, [composerOpen, composerDisabled]);
+  useEffect(() => {
+    if (!composerOpen || composerDisabled) return;
+    const field = textareaRef.current;
+    field?.focus({ preventScroll: true });
+    const cursor = field?.value.length ?? 0;
+    field?.setSelectionRange(cursor, cursor);
+    draftSelection.current = { start: cursor, end: cursor };
+  }, [composerOpen, composerDisabled]);
 
   useEffect(() => {
     const refresh = () => setClock(Date.now());
@@ -141,11 +153,10 @@ export default function App() {
   }, []);
 
   const stats = useMemo(() => {
-    const tags = new Map<string, { label: string; count: number }>();
-    for (const post of allPosts) for (const label of post.tags) { const key = normalizeTag(label); tags.set(key, { label: tags.get(key)?.label ?? label, count: (tags.get(key)?.count ?? 0) + 1 }); }
     const dayStart = new Date(clock).setHours(0, 0, 0, 0);
-    return { anger: totalAnger(allPosts), today: allPosts.filter(post => post.createdAt >= dayStart).length, tags: Array.from(tags.values()).sort((a, b) => b.count - a.count) };
+    return { anger: totalAnger(allPosts), today: allPosts.filter(post => post.createdAt >= dayStart).length, tags: getTagUsage(allPosts) };
   }, [posts, clock]);
+  const matchingTags = stats.tags.filter(value => normalizeTag(value.label).includes(normalizeTag(tagQuery.trim()).replace(/^#/, '')));
   const visiblePosts = useMemo(() => {
     let results = allPosts.filter(post => !tag || post.tags.some(value => normalizeTag(value) === normalizeTag(tag)));
     if (page === 'timeline') return orderTimeline(results, timelineMode, timelineSeed);
@@ -156,16 +167,39 @@ export default function App() {
 
   function notify(message: string, error = false) { setNotice({ message, error }); }
   function navigate(next: Page) { setPage(next); setTag(''); setSearch(''); window.scrollTo({ top: 0 }); }
-  function compose() { setComposeError(undefined); setComposerOpen(true); }
+  function compose() { setComposeError(undefined); setTagPickerOpen(false); setTagQuery(''); setComposerOpen(true); }
+  function closeComposer() { if (!saving) { setComposerOpen(false); setTagPickerOpen(false); setTagQuery(''); } }
+  function closeTagPicker() { setTagPickerOpen(false); setTagQuery(''); tagButtonRef.current?.focus(); }
   function selectTimeline(mode: TimelineMode) { if (mode === 'random') setTimelineSeed(createTimelineSeed()); setTimelineMode(mode); }
   function searchTag(value: string) { setPage('search'); setSearch(''); setTag(value); window.scrollTo({ top: 0 }); }
-  function addTag(value = '') { if (composerDisabled) return; setBody(current => `${current}${current && !/\s$/.test(current) ? ' ' : ''}#${value}${value ? ' ' : ''}`); textareaRef.current?.focus(); }
+  function rememberDraftSelection() {
+    const field = textareaRef.current;
+    if (field) draftSelection.current = { start: field.selectionStart, end: field.selectionEnd };
+  }
+  function addTag(value = '') {
+    if (composerDisabled || (value && hasBodyTag(body, value))) return;
+    const start = Math.min(draftSelection.current.start, body.length);
+    const end = Math.min(Math.max(start, draftSelection.current.end), body.length);
+    let before = body.slice(0, start);
+    const after = body.slice(end);
+    // Replace a lone # at the cursor rather than inserting a second one.
+    if (start === end && /(?:^|\s)[#＃]$/.test(before)) before = before.slice(0, -1);
+    const leadingSpace = before && !/\s$/.test(before) ? ' ' : '';
+    const trailingSpace = (!after || !/^\s/.test(after)) && (value || after) ? ' ' : '';
+    const insertion = `${leadingSpace}#${value}${trailingSpace}`;
+    const nextBody = `${before}${insertion}${after}`;
+    const cursor = value ? before.length + insertion.length + (!trailingSpace && /^\s/.test(after) ? 1 : 0) : before.length + leadingSpace.length + 1;
+    setBody(nextBody); setComposeError(undefined); setTagPickerOpen(false); setTagQuery('');
+    draftSelection.current = { start: cursor, end: cursor };
+    textareaRef.current?.focus({ preventScroll: true });
+    requestAnimationFrame(() => textareaRef.current?.setSelectionRange(cursor, cursor));
+  }
   async function submit(event: FormEvent) {
     event.preventDefault(); if (!body.trim() || saving || !posts || loadError) return;
     setSaving(true); setComposeError(undefined);
     try {
       await createPost(body, initialAnger);
-      setBody(''); setInitialAnger('0'); setComposerOpen(false); setPage('timeline'); setTimelineMode('newest'); setTag(''); setSearch('');
+      setBody(''); setInitialAnger('0'); setComposerOpen(false); setTagPickerOpen(false); setTagQuery(''); setPage('timeline'); setTimelineMode('newest'); setTag(''); setSearch('');
       requestAnimationFrame(() => window.scrollTo({ top: 0 }));
       notify('吐き出せました。おつかれさま。');
     } catch (error) { setComposeError(friendlyError(error)); } finally { setSaving(false); }
@@ -221,20 +255,30 @@ export default function App() {
     </main>
     <aside className="right-sidebar"><div className="privacy-label"><span className="status-dot" /><LockKeyhole size={12} />誰にも見せない、わたしの場所</div><section className="stats-panel"><div className="panel-heading"><h2>あなたの記録</h2><span>MY LITTLE LOG</span></div><div className="stats-primary"><div><span>吐き出したひとりごと</span><strong>{numberLabel(allPosts.length)}<small>件</small></strong></div><span className="stats-icon"><Pencil size={21} strokeWidth={1.5} /></span></div><div className="stats-bottom"><div><span><Flame size={13} /> 累計イライラ</span><strong>{numberLabel(stats.anger)}<small>回</small></strong></div><div><span><Sun size={13} /> 今日の投稿</span><strong>{numberLabel(stats.today)}<small>件</small></strong></div></div></section><section className="tag-panel"><div className="panel-heading"><h2>よく使うタグ</h2><Hash size={17} /></div>{stats.tags.length ? <div className="sidebar-tags">{stats.tags.slice(0, 8).map(value => <button key={normalizeTag(value.label)} onClick={() => searchTag(value.label)}>#{value.label}<span>{value.count}</span></button>)}</div> : <p className="muted tag-empty">あなたの気持ちに、目印を。<br />投稿に #タグ をつけてみよう。</p>}</section><section className="breather-card"><div className="breather-top"><Leaf size={15} /><span>ひと息メモ</span><span>01</span></div><SteamArt quiet /><h2>怒った日も、<br />ちゃんと生きた日。</h2><p>書いて、少しだけ手放して。<br />あとは、あったかいものでも。</p><span className="breather-line" /></section><div className="right-footer"><LockKeyhole size={13} /><p>気持ちはサーバーに送りません。<br />あなたの端末に、そっと保存します。</p></div><span className="made-for-you">余白を、こころに。<span>愚痴ったー © 2026</span></span></aside>
     {navigation(true)}<button className="floating-compose" onClick={compose} aria-label="愚痴をこぼす"><Plus size={26} /></button>
-    {composerOpen && <Dialog title="愚痴をこぼす" className="compose-dialog" closeDisabled={saving} onClose={() => { if (!saving) setComposerOpen(false); }} action={<button className="primary-button submit-post" form="new-post-form" type="submit" disabled={composerDisabled || !body.trim()}>{saving ? '保存中…' : '吐き出す'}<ArrowUpRight size={17} /></button>}>
+    {composerOpen && <Dialog title="愚痴をこぼす" className="compose-dialog" closeDisabled={saving} onClose={closeComposer} onEscape={() => { if (!saving) { if (tagPickerOpen) closeTagPicker(); else closeComposer(); } }} action={<button className="primary-button submit-post" form="new-post-form" type="submit" disabled={composerDisabled || !body.trim()}>{saving ? '保存中…' : '吐き出す'}<ArrowUpRight size={17} /></button>}>
       <form id="new-post-form" className="composer" onSubmit={submit}>
         <div className="composer-top">
           <div className="avatar"><Flame size={24} strokeWidth={1.7} /></div>
           <div className="composer-input">
             <label className="sr-only" htmlFor="new-post">今の気持ち</label>
-            <textarea id="new-post" ref={textareaRef} placeholder="いま、何にモヤモヤしてる？" value={body} onChange={event => { setBody(event.target.value); setComposeError(undefined); }} rows={7} disabled={composerDisabled} autoFocus />
-            <div className="composer-suggestions"><span>たとえば</span>{['仕事', '人間関係', '日常'].map(value => <button type="button" key={value} disabled={composerDisabled} onClick={() => addTag(value)}>#{value}</button>)}</div>
+            <textarea id="new-post" ref={textareaRef} placeholder="いま、何にモヤモヤしてる？" value={body} onChange={event => { setBody(event.target.value); setComposeError(undefined); rememberDraftSelection(); }} onSelect={rememberDraftSelection} onBlur={rememberDraftSelection} rows={7} disabled={composerDisabled} autoFocus />
           </div>
         </div>
         <div className="composer-bottom"><div className="composer-tools">
-          <button type="button" className="icon-button" aria-label="タグをつける" title="タグをつける" disabled={composerDisabled} onClick={() => addTag()}><Hash size={21} /></button><span className="tool-divider" />
+          <button ref={tagButtonRef} type="button" className={`icon-button ${tagPickerOpen ? 'tag-picker-active' : ''}`} aria-label="タグを選ぶ" title="タグを選ぶ" aria-expanded={tagPickerOpen} aria-controls="composer-tag-picker" disabled={composerDisabled} onClick={() => { rememberDraftSelection(); setTagQuery(''); setTagPickerOpen(open => !open); }}><Hash size={21} /></button><span className="tool-divider" />
           <button type="button" className="draft-anger" aria-label="投稿前のイライラを1増やす" disabled={composerDisabled} onClick={() => setInitialAnger(incrementAnger(initialAnger))}><Flame size={18} /><span>{numberLabel(initialAnger)}</span></button><span className="draft-label">いまのイライラ</span>
         </div></div>
+        {tagPickerOpen && <section id="composer-tag-picker" className="tag-picker" role="region" aria-label="これまでのタグ">
+          <div className="tag-picker-head"><div><h3>これまでのタグ</h3><p>よく使う順</p></div><button type="button" className="icon-button" aria-label="タグ一覧を閉じる" disabled={saving} onClick={closeTagPicker}><X size={18} /></button></div>
+          {stats.tags.length > 0 ? <>
+            <div className="tag-picker-search"><Search size={16} /><input type="search" aria-label="タグを絞り込む" placeholder="タグを絞り込む" value={tagQuery} onChange={event => setTagQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') event.preventDefault(); }} disabled={composerDisabled} /></div>
+            <div className="tag-picker-list">{matchingTags.length ? matchingTags.map(value => {
+              const selected = hasBodyTag(body, value.label);
+              return <button type="button" key={normalizeTag(value.label)} aria-label={`#${value.label}を追加`} className={selected ? 'tag-already-added' : ''} disabled={composerDisabled || selected} onClick={() => addTag(value.label)}><span className="tag-picker-label">#{value.label}</span><span className="tag-usage">{numberLabel(value.count)}件</span>{selected && <Check size={15} />}</button>;
+            }) : <p className="tag-picker-empty">一致するタグがありません。</p>}</div>
+          </> : <p className="tag-picker-empty">まだ使ったタグがありません。本文に #タグ を書くと、次からここで選べます。</p>}
+          <button type="button" className="text-button new-tag-button" disabled={composerDisabled} onClick={() => addTag()}><Plus size={15} />新しいタグを入力</button>
+        </section>}
         {(composeError || loadError) && <p className="compose-error" role="alert">{composeError || '保存領域を読み込めませんでした。閉じて、もう一度読み込みをお試しください。'}</p>}
       </form>
     </Dialog>}

@@ -108,6 +108,7 @@ test('a fresh diary persists text, tags, and every anger tap after reload', asyn
 
   await expect.poll(async () => (await storedPosts(page))[0]?.angerCount).toBe('10');
   await expect(card.getByText('10', { exact: true })).toBeVisible();
+  await expect(card.getByText('端末に保存済み', { exact: true })).toHaveCount(0);
   await page.reload();
   await expect(postCard(page, body)).toBeVisible();
   await expect(postCard(page, body).getByText('10', { exact: true })).toBeVisible();
@@ -156,6 +157,18 @@ test('the composer opens as a focused modal and keeps text and anger after closi
   await expectNoHorizontalOverflow(page);
   await expect(composer.getByRole('button', { name: '吐き出す', exact: true })).toBeDisabled();
 
+  const tagPickerButton = composer.getByRole('button', { name: 'タグを選ぶ', exact: true });
+  await expect(tagPickerButton).toHaveAttribute('aria-expanded', 'false');
+  await tagPickerButton.click();
+  const tagPicker = composer.getByRole('region', { name: 'これまでのタグ', exact: true });
+  await expect(tagPickerButton).toHaveAttribute('aria-expanded', 'true');
+  await expect(tagPicker).toContainText('まだ使ったタグがありません。本文に #タグ を書くと、次からここで選べます。');
+  await expect(tagPicker.getByRole('button', { name: /^#.*を追加$/ })).toHaveCount(0);
+  await tagPicker.getByRole('button', { name: '新しいタグを入力', exact: true }).click();
+  await expect(tagPicker).not.toBeVisible();
+  await expect(input).toHaveValue('#');
+  await expect(input).toBeFocused();
+
   const draft = '書きかけの気持ちも、いったん閉じて考える。 #下書き';
   await input.fill(draft);
   const draftAnger = composer.getByRole('button', { name: '投稿前のイライラを1増やす', exact: true });
@@ -198,6 +211,69 @@ test('the composer opens as a focused modal and keeps text and anger after closi
   await expect(input).toHaveValue('');
   await expect(draftAnger).toContainText('0');
   await composer.getByRole('button', { name: '閉じる', exact: true }).click();
+});
+
+test('the composer lists saved tags by usage and inserts a selected tag at the caret', async ({ page }) => {
+  await page.goto('./');
+  for (const body of [
+    '会議がまた延びた。 #仕事 #仕事 #日常',
+    '夕方にひと息。 #仕事 #趣味',
+    '今日の片づけ。 #仕事 #日常',
+  ]) await submitPost(page, body);
+  await expect(page.getByRole('article').getByText('端末に保存済み', { exact: true })).toHaveCount(0);
+
+  const composer = await openComposer(page);
+  const input = composer.getByRole('textbox', { name: '今の気持ち', exact: true });
+  const tagPickerButton = composer.getByRole('button', { name: 'タグを選ぶ', exact: true });
+  const tagPicker = composer.getByRole('region', { name: 'これまでのタグ', exact: true });
+  await input.fill('前半後半');
+  await input.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(2, 2));
+  await tagPickerButton.click();
+  const options = tagPicker.getByRole('button', { name: /^#.*を追加$/ });
+  await expect(options).toHaveCount(3);
+  await expect(options).toContainText(['#仕事', '#日常', '#趣味']);
+  await expect(tagPicker.getByRole('button', { name: '#仕事を追加', exact: true })).toContainText('3件');
+  await expect(tagPicker.getByRole('button', { name: '#日常を追加', exact: true })).toContainText('2件');
+  await expect(tagPicker.getByRole('button', { name: '#趣味を追加', exact: true })).toContainText('1件');
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: test.info().outputPath('tag-picker.png'), fullPage: true });
+
+  const tagSearch = tagPicker.getByRole('searchbox', { name: 'タグを絞り込む', exact: true });
+  await tagSearch.fill('日常');
+  await expect(options).toHaveCount(1);
+  await expect(options.first()).toContainText('#日常');
+  await tagSearch.fill('見つからないタグ');
+  await expect(options).toHaveCount(0);
+  await expect(tagPicker).toContainText('一致するタグがありません。');
+  await tagSearch.press('Enter');
+  await expect(composer).toBeVisible();
+  await expect(page.getByRole('article')).toHaveCount(3);
+  expect(await storedPosts(page)).toHaveLength(3);
+  await tagSearch.fill('');
+
+  await tagPicker.getByRole('button', { name: '#仕事を追加', exact: true }).click();
+  await expect(input).toHaveValue('前半 #仕事 後半');
+  await expect(input).toBeFocused();
+  await expect(tagPicker).not.toBeVisible();
+  await tagPickerButton.click();
+  await expect(tagPicker.getByRole('button', { name: '#仕事を追加', exact: true })).toBeDisabled();
+  await tagSearch.press('Escape');
+  await expect(tagPicker).not.toBeVisible();
+  await expect(composer).toBeVisible();
+  await expect(input).toHaveValue('前半 #仕事 後半');
+  await tagPickerButton.click();
+  await tagPicker.getByRole('button', { name: 'タグ一覧を閉じる', exact: true }).click();
+  await expect(input).toHaveValue('前半 #仕事 後半');
+  await composer.getByRole('button', { name: '閉じる', exact: true }).click();
+  await openComposer(page);
+  await expect(input).toHaveValue('前半 #仕事 後半');
+  await composer.getByRole('button', { name: '閉じる', exact: true }).click();
+
+  await page.reload();
+  await openComposer(page);
+  await tagPickerButton.click();
+  await expect(options).toContainText(['#仕事', '#日常', '#趣味']);
+  await expect(tagPicker.getByRole('button', { name: '#仕事を追加', exact: true })).toContainText('3件');
 });
 
 test('timeline tabs show newest posts or a stable random selection of every post', async ({ page }) => {
@@ -319,6 +395,13 @@ test('the cached production app reopens, reads, and writes while offline without
   await page.reload();
   await expect(postCard(page, onlineBody)).toBeVisible();
   await expect(postCard(page, offlineBody)).toBeVisible();
+
+  const offlineComposer = await openComposer(page);
+  await offlineComposer.getByRole('button', { name: 'タグを選ぶ', exact: true }).click();
+  const offlineTags = offlineComposer.getByRole('region', { name: 'これまでのタグ', exact: true });
+  await expect(offlineTags.getByRole('button', { name: '#日常を追加', exact: true })).toContainText('1件');
+  await expect(offlineTags.getByRole('button', { name: '#オフラインを追加', exact: true })).toContainText('1件');
+  await offlineComposer.getByRole('button', { name: '閉じる', exact: true }).click();
 
   // Closing the app tab tests a new navigation, beyond a cached in-memory React view.
   await page.close();
