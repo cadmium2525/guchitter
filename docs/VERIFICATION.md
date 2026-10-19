@@ -1,4 +1,26 @@
-# 初回実装の検証記録
+# 検証記録
+
+## 投稿モーダル・タイムラインタブの変更
+
+2026-10-19 に検証。歓迎バナーとヘッダーの「この端末だけ」表示を削除し、投稿をモーダルに移し、タイムラインへ「新しい順」「ランダム」のタブを追加した。IndexedDB のスキーマ変更・データ移行はない。
+
+| 検証 | 結果 |
+| --- | --- |
+| TypeScript 型チェック | PASS |
+| Vitest 基本テスト | 29 件 PASS（既存 22 件＋並べ替え 7 件） |
+| 本番ビルド / Service Worker 生成 | PASS |
+| Chrome デスクトップ・Android 相当、WebKit / iPhone 相当 | E2E 合計 21 件 PASS。すべて `/guchitter/` サブパスで実行 |
+| モーダル開閉・自動フォーカス・Escape | E2E PASS |
+| 閉じた本文・怒り値の下書き保持、保存成功後の初期化と新しい順への復帰 | E2E PASS |
+| ランダムの全投稿表示・炎加算時の順序保持 | E2E PASS |
+| シードによる並べ直し・編集時の順序保持 | 基本テスト PASS |
+| 編集・削除・検索・ランキング・オフライン・manifest | E2E PASS |
+| 新規投稿の保存失敗時のモーダル・下書き保持 | コードレビュー済み。DB 保存エラーの基本テスト PASS。ブラウザーでの障害注入は未実施 |
+| iPhone Safari / Android Chrome 実機 | NOT RUN |
+
+今回の結果は上の合計件数に含まれる。Chrome・WebKit のエミュレーションは実機確認を意味しない。実機のキーボード・読み上げ・safe area を含む未実施項目は [DEVICE-TESTS.md](DEVICE-TESTS.md) に記録している。GitHub Pages の配備状況は [Actions](https://github.com/cadmium2525/guchitter/actions/workflows/deploy.yml) で確認する。
+
+## 初回実装
 
 実施日：2026-10-19。ローカル Windows / Node.js 24.12.0 で検証した。
 
@@ -37,19 +59,21 @@ $env:PLAYWRIGHT_PORT = '4187'
 npm run test:e2e
 ```
 
-初めて実行する環境では、README の手順でテストブラウザーを導入する。サブパスは次のように確認する。
+初めて実行する環境では、README の手順でテストブラウザーを導入する。サブパスで全 E2E を確認するには次のように実行する。
 
 ```powershell
 $env:VITE_BASE_PATH = '/guchitter/'
-npm run test:e2e -- --project=chromium-android-emulation --project=webkit-iphone-emulation --grep 'cached production|install manifest'
+npm run test:e2e
 Remove-Item Env:VITE_BASE_PATH
 ```
 
 ## スクリーンショット
 
-E2E が作成した架空のテスト日記を撮影したもので、初期データとしてアプリに登録されるものではない。
+投稿モーダル・タイムラインタブ変更後の画面。日記のある画像には架空のテスト日記を使い、初期データとしてアプリに登録されるものではない。
 
+- [初回表示](screenshots/first-open.png)
 - [デスクトップ](screenshots/timeline-desktop.png)
 - [スマートフォン幅](screenshots/timeline-mobile.png)
+- [スマートフォン幅の投稿モーダル](screenshots/composer-mobile.png)
 
 画像添付、画像変換、暗号化バックアップ、復元、バックアップリマインダーは未実装であり、今回の検証対象には含まない。

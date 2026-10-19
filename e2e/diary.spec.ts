@@ -22,14 +22,23 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport + 1);
 }
 
+async function openComposer(page: Page) {
+  await visibleButton(page, '愚痴をこぼす').click();
+  const dialog = page.getByRole('dialog', { name: '愚痴をこぼす', exact: true });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
 async function submitPost(page: Page, body: string) {
-  const input = page.getByRole('textbox', { name: '今の気持ち', exact: true });
+  const dialog = await openComposer(page);
+  const input = dialog.getByRole('textbox', { name: '今の気持ち', exact: true });
   await expect(input).toBeEditable();
   await input.fill(body);
   await expect(input).toHaveValue(body);
-  const submit = visibleButton(page, '吐き出す');
+  const submit = dialog.getByRole('button', { name: '吐き出す', exact: true });
   await expect(submit).toBeEnabled();
   await submit.click();
+  await expect(dialog).not.toBeVisible();
   await expect(postCard(page, body)).toHaveCount(1);
 }
 
@@ -78,10 +87,18 @@ function observeUnexpectedRequests(context: BrowserContext, origin: string) {
 test('a fresh diary persists text, tags, and every anger tap after reload', async ({ page }) => {
   await page.goto('./');
   await expect(page.getByRole('heading', { name: 'タイムライン', exact: true, includeHidden: true })).toBeAttached();
-  await expect(page.getByRole('textbox', { name: '今の気持ち', exact: true })).toBeEditable();
+  await expect(page.getByRole('textbox', { name: '今の気持ち', exact: true })).toHaveCount(0);
+  await expect(page.getByText('この端末だけ', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('YOUR LITTLE SAFE PLACE', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('article')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: test.info().outputPath('timeline-empty.png'), fullPage: true });
+
+  const composer = await openComposer(page);
+  await expect(composer.getByRole('textbox', { name: '今の気持ち', exact: true })).toBeEditable();
+  await page.screenshot({ path: test.info().outputPath('composer.png'), fullPage: true });
+  await composer.getByRole('button', { name: '閉じる', exact: true }).click();
+  await expect(composer).not.toBeVisible();
 
   const body = 'また会議が長かった。でも今日は書いて手放す。 #仕事 #日常';
   await submitPost(page, body);
@@ -116,6 +133,107 @@ test('a fresh diary persists text, tags, and every anger tap after reload', asyn
   await expectNoHorizontalOverflow(page);
 });
 
+test('the composer opens as a focused modal and keeps text and anger after closing or Escape', async ({ page }) => {
+  await page.goto('./');
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: '並び順', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^すべて/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '今日のひとりごと', exact: true })).toHaveCount(0);
+
+  const composer = await openComposer(page);
+  const input = composer.getByRole('textbox', { name: '今の気持ち', exact: true });
+  await expect(composer).toHaveJSProperty('open', true);
+  await expect(input).toBeEditable();
+  await expect(input).toBeFocused();
+  const bounds = await composer.evaluate((dialog) => {
+    const rect = dialog.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: window.innerWidth, height: window.innerHeight };
+  });
+  expect(bounds.left).toBeGreaterThanOrEqual(-1);
+  expect(bounds.right).toBeLessThanOrEqual(bounds.width + 1);
+  expect(bounds.top).toBeGreaterThanOrEqual(-1);
+  expect(bounds.bottom).toBeLessThanOrEqual(bounds.height + 1);
+  await expectNoHorizontalOverflow(page);
+  await expect(composer.getByRole('button', { name: '吐き出す', exact: true })).toBeDisabled();
+
+  const draft = '書きかけの気持ちも、いったん閉じて考える。 #下書き';
+  await input.fill(draft);
+  const draftAnger = composer.getByRole('button', { name: '投稿前のイライラを1増やす', exact: true });
+  await draftAnger.click();
+  await draftAnger.click();
+  await expect(draftAnger).toContainText('2');
+
+  // A native confirm would leave the browser unable to continue, so record it too.
+  const unexpectedDialogs: string[] = [];
+  page.on('dialog', async (dialog) => {
+    unexpectedDialogs.push(dialog.type());
+    await dialog.dismiss();
+  });
+  await composer.getByRole('button', { name: '閉じる', exact: true }).click();
+  await expect(composer).not.toBeVisible();
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+  await expect(page.getByRole('article')).toHaveCount(0);
+  expect(await storedPosts(page)).toEqual([]);
+
+  await openComposer(page);
+  await expect(input).toHaveValue(draft);
+  await expect(draftAnger).toContainText('2');
+  await input.press('Escape');
+  await expect(composer).not.toBeVisible();
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+
+  // Also preserve the draft when opening from another page; saving returns home.
+  await visibleButton(page, '検索').click();
+  await openComposer(page);
+  await expect(input).toHaveValue(draft);
+  await expect(draftAnger).toContainText('2');
+  await composer.getByRole('button', { name: '吐き出す', exact: true }).click();
+  await expect(composer).not.toBeVisible();
+  await expect(postCard(page, draft)).toBeVisible();
+  await expect(page.getByRole('tab', { name: '新しい順', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect.poll(async () => (await storedPosts(page))[0]?.angerCount).toBe('2');
+  expect(unexpectedDialogs).toEqual([]);
+
+  await openComposer(page);
+  await expect(input).toHaveValue('');
+  await expect(draftAnger).toContainText('0');
+  await composer.getByRole('button', { name: '閉じる', exact: true }).click();
+});
+
+test('timeline tabs show newest posts or a stable random selection of every post', async ({ page }) => {
+  await page.goto('./');
+  const bodies = ['最初のひとりごと。', '二番目のひとりごと。', '三番目のひとりごと。', 'いちばん新しいひとりごと。'];
+  for (const body of bodies) await submitPost(page, body);
+  const newest = page.getByRole('tab', { name: '新しい順', exact: true });
+  const random = page.getByRole('tab', { name: 'ランダム', exact: true });
+  await expect(newest).toHaveAttribute('aria-selected', 'true');
+  await expect(random).toHaveAttribute('aria-selected', 'false');
+  await expect(page.getByRole('article')).toContainText([...bodies].reverse());
+
+  const timelineBodies = () => page.getByRole('article').locator('.post-body').allTextContents();
+  await random.click();
+  await expect(random).toHaveAttribute('aria-selected', 'true');
+  await expect(newest).toHaveAttribute('aria-selected', 'false');
+  const randomOrder = await timelineBodies();
+  expect([...randomOrder].sort()).toEqual([...bodies].sort());
+
+  await postCard(page, randomOrder[0]).getByRole('button', { name: 'イライラを1増やす', exact: true }).click();
+  await expect.poll(async () => (await storedPosts(page)).find((post) => post.body === randomOrder[0])?.angerCount).toBe('1');
+  await expect(postCard(page, randomOrder[0]).getByText('1', { exact: true })).toBeVisible();
+  expect(await timelineBodies()).toEqual(randomOrder);
+
+  await newest.click();
+  await expect(page.getByRole('article')).toContainText([...bodies].reverse());
+  await random.click();
+  expect((await timelineBodies()).sort()).toEqual([...bodies].sort());
+
+  const latest = 'ランダムを見たあとに書いた、最新のひとりごと。';
+  await submitPost(page, latest);
+  await expect(newest).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('article')).toContainText([latest, ...bodies.slice().reverse()]);
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+});
+
 test('search and ranking find the locally written diary entries', async ({ page }) => {
   await page.goto('./');
   const workBody = '電車も会議もぎゅうぎゅうだった。 #仕事 #日常';
@@ -129,6 +247,10 @@ test('search and ranking find the locally written diary entries', async ({ page 
     .toBe('3');
 
   await visibleButton(page, '検索').click();
+  const searchSort = page.getByRole('combobox', { name: '並び順', exact: true });
+  await expect(searchSort).toBeVisible();
+  await searchSort.selectOption('oldest');
+  await expect(page.getByRole('article')).toContainText([workBody, otherBody]);
   const search = page.getByLabel('日記を検索', { exact: true });
   await search.fill('ぎゅうぎゅう');
   await expect(postCard(page, workBody)).toBeVisible();
