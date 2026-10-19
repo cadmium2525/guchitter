@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { liveQuery } from 'dexie';
 import { useRegisterSW } from 'virtual:pwa-register/react';
-import { ArrowDownWideNarrow, ArrowUpRight, Check, ChevronRight, Download, Flame, Hash, Home, Leaf, LockKeyhole, Monitor, Moon, MoreHorizontal, Pencil, Plus, Search, Settings, ShieldCheck, Sun, Trash2, WifiOff, X } from 'lucide-react';
+import { ArrowDownWideNarrow, ArrowLeft, ArrowUpRight, Check, ChevronRight, Download, Flame, Hash, Home, Leaf, LockKeyhole, MessageCircle, Monitor, Moon, MoreHorizontal, Pencil, Plus, Quote, Reply, Search, Settings, ShieldCheck, Sun, Trash2, WifiOff, X } from 'lucide-react';
 import { compareAnger, createPost, db, deletePost, incrementAnger, incrementPostAnger, normalizeTag, stripTagsForDisplay, totalAnger, updatePost, type Post } from './data';
 import { createTimelineSeed, orderTimeline, type TimelineMode } from './data/timeline';
 import { getTagUsage, hasBodyTag } from './data/tags';
 import { ImagePicker, PostImages, type ImageItem } from './components/Images';
 import { type PreparedImage } from './data/images';
 import { BackupReminder, BackupSettings } from './components/BackupSettings';
+import { PostReference } from './components/PostReference';
+import { buildThread, indexPosts } from './data/threads';
+import './components/relations.css';
 
-type Page = 'timeline' | 'search' | 'ranking' | 'settings';
+type NavPage = 'timeline' | 'search' | 'ranking' | 'settings';
+type Page = NavPage | 'thread';
+type DraftRelation = { kind: 'quote' | 'reply'; postId: string };
 type Theme = 'light' | 'dark' | 'system';
 type InstallEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: string }> };
 const navItems = [
@@ -34,6 +39,11 @@ function friendlyError(error: unknown): string {
 }
 function getInitialTheme(): Theme {
   try { const value = localStorage.getItem('guchitter-theme'); return value === 'light' || value === 'dark' ? value : 'system'; } catch { return 'system'; }
+}
+
+function readThreadId(): string | undefined {
+  if (!window.location.hash.startsWith('#thread/')) return;
+  try { return decodeURIComponent(window.location.hash.slice(8)) || undefined; } catch { return; }
 }
 
 function AngerIcon({ size = 19 }: { size?: number }) {
@@ -61,7 +71,7 @@ function Dialog({ title, children, onClose, onEscape, className = '', action, cl
   return <dialog ref={ref} className={`dialog ${className}`} onCancel={event => { event.preventDefault(); (onEscape ?? onClose)(); }} aria-labelledby="dialog-title"><div className="dialog-head"><h2 id="dialog-title">{title}</h2><button className="icon-button" onClick={onClose} aria-label="閉じる" disabled={closeDisabled}><X size={21} /></button>{action}</div>{children}</dialog>;
 }
 
-function PostCard({ post, rank, onTag, onEdit, onDelete, onError }: { post: Post; rank?: number; onTag(tag: string): void; onEdit(post: Post): void; onDelete(post: Post): void; onError(message: string): void }) {
+function PostCard({ post, rank, quotePost, replyPost, replyCount, onThread, onComposeRelation, disabled, onTag, onEdit, onDelete, onError }: { post: Post; rank?: number; quotePost?: Post; replyPost?: Post; replyCount: number; onThread(id: string): void; onComposeRelation(post: Post, kind: DraftRelation['kind']): void; disabled: boolean; onTag(tag: string): void; onEdit(post: Post): void; onDelete(post: Post): void; onError(message: string): void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pulse, setPulse] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -79,16 +89,21 @@ function PostCard({ post, rank, onTag, onEdit, onDelete, onError }: { post: Post
     <div className="avatar"><Flame size={23} strokeWidth={1.7} /></div>
     <div className="post-main">
       <div className="post-head"><span className="post-author">わたし</span><span className="post-private"><LockKeyhole size={11} /> 自分だけ</span><span className="time-dot">·</span><time dateTime={new Date(post.createdAt).toISOString()} title={new Date(post.createdAt).toLocaleString('ja-JP')}>{timeLabel(post.createdAt)}</time><div className="post-menu" ref={menuRef}><button className="icon-button" aria-label="投稿のメニュー" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><MoreHorizontal size={20} /></button>{menuOpen && <div className="dropdown"><button onClick={() => { setMenuOpen(false); onEdit(post); }}><Pencil size={16} />編集</button><button className="danger-text" onClick={() => { setMenuOpen(false); onDelete(post); }}><Trash2 size={16} />削除</button></div>}</div></div>
+      {post.replyToId && <button type="button" className="reply-context" disabled={disabled} onClick={() => onThread(post.replyToId!)} aria-label="返信先を表示"><Reply size={13} />{replyPost ? 'わたしの投稿への返信' : '返信先の投稿は削除されています。'}</button>}
       {displayBody && <p className="post-body">{displayBody}</p>}
       {post.imageIds?.length > 0 && <PostImages postId={post.id} imageIds={post.imageIds} />}
       {post.tags.length > 0 && <div className="post-tags">{post.tags.map(tag => <button key={normalizeTag(tag)} onClick={() => onTag(tag)}>#{tag}</button>)}</div>}
-      <div className="post-footer"><button className={`anger-button ${post.angerCount !== '0' ? 'has-anger' : ''}`} aria-label="イライラを1増やす" onClick={tap}><span key={pulse} className={pulse ? 'anger-pop' : ''}><AngerIcon /></span><span className="anger-value">{numberLabel(post.angerCount)}</span><span className="tap-hint">わかる、あのイライラ</span></button></div>
+      {post.quotePostId && <PostReference post={quotePost} kind="quote" onOpen={disabled ? undefined : () => onThread(post.quotePostId!)} showImages />}
+      <div className="post-footer"><button className={`anger-button ${post.angerCount !== '0' ? 'has-anger' : ''}`} aria-label="イライラを1増やす" disabled={disabled} onClick={tap}><span key={pulse} className={pulse ? 'anger-pop' : ''}><AngerIcon /></span><span className="anger-value">{numberLabel(post.angerCount)}</span></button><div className="post-actions"><button type="button" aria-label="返信する" title="返信する" disabled={disabled} onClick={() => onComposeRelation(post, 'reply')}><Reply size={18} /><span>返信</span></button><button type="button" aria-label="引用する" title="引用して投稿" disabled={disabled} onClick={() => onComposeRelation(post, 'quote')}><Quote size={17} /><span>引用</span></button><button type="button" aria-label="スレッドを表示" title="スレッドを表示" disabled={disabled} onClick={() => onThread(post.id)}><MessageCircle size={17} /><span>{numberLabel(replyCount)}</span></button></div></div>
     </div>
   </article>;
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>('timeline');
+  const [page, setPage] = useState<Page>(() => readThreadId() ? 'thread' : 'timeline');
+  const [threadId, setThreadId] = useState<string | undefined>(readThreadId);
+  const [draftRelation, setDraftRelation] = useState<DraftRelation>();
+  const threadReturn = useRef<{ page: NavPage; scroll: number }>({ page: 'timeline', scroll: 0 });
   const [clock, setClock] = useState(Date.now());
   const [posts, setPosts] = useState<Post[] | undefined>();
   const [loadError, setLoadError] = useState(false);
@@ -127,7 +142,7 @@ export default function App() {
   const allPosts = posts ?? [];
   const composerDisabled = saving || imageBusy || backupBusy || posts === undefined || loadError;
   const editDirty = Boolean(editing && (editBody !== editing.body || editImages.length !== (editing.imageIds?.length ?? 0) || editImages.some((image, index) => !('id' in image) || image.id !== editing.imageIds[index])));
-  const dirty = body.length > 0 || initialAnger !== '0' || draftImages.length > 0 || imageBusy || backupDirty || editDirty;
+  const dirty = body.length > 0 || initialAnger !== '0' || draftImages.length > 0 || Boolean(draftRelation) || imageBusy || backupDirty || editDirty;
   const { needRefresh: [needRefresh], offlineReady: [offlineReady], updateServiceWorker } = useRegisterSW({ onRegisterError() { setNotice({ message: 'オフライン用ファイルの準備に失敗しました。オンラインで再読み込みしてください。', error: true }); } });
 
   useEffect(() => {
@@ -135,6 +150,16 @@ export default function App() {
     const subscription = liveQuery(() => db.posts.orderBy('createdAt').reverse().toArray()).subscribe({ next: setPosts, error: () => { setLoadError(true); } });
     return () => subscription.unsubscribe();
   }, [retry]);
+  useEffect(() => {
+    const change = () => {
+      const id = readThreadId();
+      setThreadId(id);
+      setPage(id ? 'thread' : threadReturn.current.page);
+      if (!id) requestAnimationFrame(() => window.scrollTo({ top: threadReturn.current.scroll }));
+    };
+    window.addEventListener('hashchange', change);
+    return () => window.removeEventListener('hashchange', change);
+  }, []);
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = () => { const dark = theme === 'dark' || (theme === 'system' && media.matches); document.documentElement.dataset.theme = dark ? 'dark' : 'light'; document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#191c1b' : '#fbf9f5'); };
@@ -172,6 +197,17 @@ export default function App() {
     return { anger: totalAnger(allPosts), today: allPosts.filter(post => post.createdAt >= dayStart).length, tags: getTagUsage(allPosts) };
   }, [posts, clock]);
   const matchingTags = stats.tags.filter(value => normalizeTag(value.label).includes(normalizeTag(tagQuery.trim()).replace(/^#/, '')));
+  const postIndex = useMemo(() => indexPosts(allPosts), [posts]);
+  const threadEntries = useMemo(() => threadId ? buildThread(postIndex, threadId) : [], [postIndex, threadId]);
+  useEffect(() => {
+    if (page !== 'thread' || posts === undefined || !threadId) return;
+    // Only move on opening another thread, not on every live counter update.
+    const frame = requestAnimationFrame(() => {
+      const element = Array.from(document.querySelectorAll<HTMLElement>('[data-thread-id]')).find(node => node.dataset.threadId === threadId);
+      element?.scrollIntoView({ block: 'center' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [page, threadId, posts === undefined]);
   const visiblePosts = useMemo(() => {
     let results = allPosts.filter(post => !tag || post.tags.some(value => normalizeTag(value) === normalizeTag(tag)));
     if (page === 'timeline') return orderTimeline(results, timelineMode, timelineSeed);
@@ -181,12 +217,29 @@ export default function App() {
   }, [posts, page, search, tag, sort, timelineMode, timelineSeed]);
 
   function notify(message: string, error = false) { setNotice({ message, error }); }
-  function navigate(next: Page) { if (backupBusy || mutationBusy || saving || imageBusy) return; setPage(next); setTag(''); setSearch(''); window.scrollTo({ top: 0 }); }
+  function navigate(next: NavPage) { if (backupBusy || mutationBusy || saving || imageBusy) return; if (readThreadId()) window.history.replaceState(null, '', window.location.pathname + window.location.search); setThreadId(undefined); setPage(next); setTag(''); setSearch(''); window.scrollTo({ top: 0 }); }
+  function showThread(id: string) {
+    if (page !== 'thread') threadReturn.current = { page, scroll: window.scrollY };
+    if (readThreadId() !== id) window.history.pushState({ guchitterThread: true }, '', `${window.location.pathname}${window.location.search}#thread/${encodeURIComponent(id)}`);
+    setThreadId(id); setPage('thread');
+  }
+  function openThread(id: string) { if (!backupBusy && !mutationBusy && !saving && !imageBusy) showThread(id); }
+  function leaveThread() {
+    if (window.history.state?.guchitterThread && readThreadId()) window.history.back();
+    else { const previous = threadReturn.current; if (readThreadId()) window.history.replaceState(null, '', window.location.pathname + window.location.search); setThreadId(undefined); setPage(previous.page); requestAnimationFrame(() => window.scrollTo({ top: previous.scroll })); }
+  }
   function compose() { if (backupBusy || mutationBusy || imageBusy) return; setComposeError(undefined); setTagPickerOpen(false); setTagQuery(''); setComposerOpen(true); }
+  function composeRelation(post: Post, kind: DraftRelation['kind']) {
+    if (backupBusy || mutationBusy || saving || imageBusy) return;
+    const changed = draftRelation?.postId !== post.id || draftRelation?.kind !== kind;
+    const hasDraft = body.length > 0 || initialAnger !== '0' || draftImages.length > 0 || Boolean(draftRelation);
+    if (changed && hasDraft && !window.confirm('書きかけの内容を残したまま、引用元・返信先を変更しますか？')) return;
+    setDraftRelation({ kind, postId: post.id }); compose();
+  }
   function closeComposer() { if (!saving && !imageBusy) { setComposerOpen(false); setTagPickerOpen(false); setTagQuery(''); } }
   function closeTagPicker() { setTagPickerOpen(false); setTagQuery(''); tagButtonRef.current?.focus(); }
   function selectTimeline(mode: TimelineMode) { if (mode === 'random') setTimelineSeed(createTimelineSeed()); setTimelineMode(mode); }
-  function searchTag(value: string) { setPage('search'); setSearch(''); setTag(value); window.scrollTo({ top: 0 }); }
+  function searchTag(value: string) { if (readThreadId()) window.history.replaceState(null, '', window.location.pathname + window.location.search); setThreadId(undefined); setPage('search'); setSearch(''); setTag(value); window.scrollTo({ top: 0 }); }
   function rememberDraftSelection() {
     const field = textareaRef.current;
     if (field) draftSelection.current = { start: field.selectionStart, end: field.selectionEnd };
@@ -213,9 +266,16 @@ export default function App() {
     event.preventDefault(); if ((!body.trim() && !draftImages.length) || composerDisabled) return;
     setSaving(true); setComposeError(undefined);
     try {
-      await createPost(body, initialAnger, db, draftImages as PreparedImage[]);
-      setBody(''); setDraftImages([]); setInitialAnger('0'); setComposerOpen(false); setTagPickerOpen(false); setTagQuery(''); setPage('timeline'); setTimelineMode('newest'); setTag(''); setSearch('');
-      requestAnimationFrame(() => window.scrollTo({ top: 0 }));
+      if (draftRelation && !postIndex.byId.has(draftRelation.postId)) { setComposeError('引用元・返信先が削除されています。下の解除ボタンで通常の投稿に変更できます。'); return; }
+      const post = await createPost(body, initialAnger, db, draftImages as PreparedImage[], draftRelation ? { [draftRelation.kind === 'quote' ? 'quotePostId' : 'replyToId']: draftRelation.postId } : undefined);
+      const isReply = draftRelation?.kind === 'reply';
+      setBody(''); setDraftImages([]); setInitialAnger('0'); setDraftRelation(undefined); setComposerOpen(false); setTagPickerOpen(false); setTagQuery('');
+      if (isReply) {
+        showThread(post.id);
+      } else {
+        if (readThreadId()) window.history.replaceState(null, '', window.location.pathname + window.location.search);
+        setThreadId(undefined); setPage('timeline'); setTimelineMode('newest'); setTag(''); setSearch(''); requestAnimationFrame(() => window.scrollTo({ top: 0 }));
+      }
       notify('吐き出せました。おつかれさま。');
     } catch (error) { setComposeError(friendlyError(error)); } finally { setSaving(false); }
   }
@@ -245,17 +305,27 @@ export default function App() {
     try { const granted = await navigator.storage?.persist?.(); setPersistent(granted); notify(granted ? '保存領域の保護が許可されました。' : 'このブラウザでは保護が許可されませんでした。閲覧データの削除にはご注意ください。'); } catch { notify('保存領域の保護を確認できませんでした。', true); } finally { setPersistenceBusy(false); }
   }
 
-  const pageTitle = navItems.find(item => item.id === page)!.label;
-  const cards = visiblePosts.map((post, index) => <PostCard key={post.id} post={post} rank={page === 'ranking' ? index + 1 : undefined} onTag={searchTag} onEdit={value => void openEditor(value)} onDelete={setDeleting} onError={message => notify(message, true)} />);
+  const pageTitle = page === 'thread' ? 'スレッド' : navItems.find(item => item.id === page)!.label;
+  const renderPost = (post: Post, rank?: number) => <PostCard key={post.id} post={post} rank={rank} quotePost={post.quotePostId ? postIndex.byId.get(post.quotePostId) : undefined} replyPost={post.replyToId ? postIndex.byId.get(post.replyToId) : undefined} replyCount={postIndex.replies.get(post.id)?.length ?? 0} onThread={openThread} onComposeRelation={composeRelation} disabled={backupBusy || mutationBusy || saving || imageBusy} onTag={searchTag} onEdit={value => void openEditor(value)} onDelete={setDeleting} onError={message => notify(message, true)} />;
+  const cards = visiblePosts.map((post, index) => renderPost(post, page === 'ranking' ? index + 1 : undefined));
   const navigation = (mobile = false) => <nav aria-label={mobile ? '下部ナビゲーション' : 'メインナビゲーション'} className={mobile ? 'bottom-nav' : 'side-nav'}>{navItems.map(({ id, label, icon: Icon }) => <button key={id} aria-label={label} aria-current={page === id ? 'page' : undefined} className={page === id ? 'active' : ''} disabled={backupBusy || mutationBusy || imageBusy || saving} onClick={() => navigate(id)}><Icon size={mobile ? 23 : 22} strokeWidth={page === id ? 2.3 : 1.8} /><span>{mobile && id === 'ranking' ? 'ランキング' : label}</span>{!mobile && page === id && <span className="nav-dot" />}</button>)}</nav>;
 
   return <div className="app-shell">
     <aside className="left-sidebar"><button className="brand-button" aria-label="愚痴ったー ホーム" onClick={() => navigate('timeline')}><Brand /></button>{navigation()}<button className="primary-button sidebar-compose" disabled={backupBusy || mutationBusy || imageBusy} onClick={compose}><Pencil size={18} /><span>愚痴をこぼす</span></button><div className="sidebar-bottom"><span className="private-badge"><LockKeyhole size={13} /> PRIVATE DIARY</span><p>今日のモヤモヤも、<br />いつか笑える思い出に。</p><div className="sidebar-profile"><span className="avatar small-avatar"><Flame size={20} /></span><div><strong>わたしの居場所</strong><span>誰にも見せない日記</span></div><ShieldCheck size={17} /></div></div></aside>
-    <main className={`main-column ${page === 'timeline' ? 'is-timeline' : ''}`} id="main-content">
-      <header className="main-header"><div className="mobile-brand"><Brand small /></div><div className="header-title"><h1 ref={headingRef}>{pageTitle}</h1><span>{page === 'timeline' ? 'ためこまずに、ここに置いていこう。' : page === 'search' ? 'あの日の気持ちを、見つける。' : page === 'ranking' ? 'あのときは、本当に腹が立った。' : 'あなたに合った、心地よい場所に。'}</span></div></header>
+    <main className={`main-column ${page === 'timeline' ? 'is-timeline' : ''} ${page === 'thread' ? 'is-thread' : ''}`} id="main-content">
+      <header className="main-header">{page === 'thread' && <button className="icon-button thread-back" aria-label="戻る" onClick={leaveThread}><ArrowLeft size={22} /></button>}<div className="mobile-brand"><Brand small /></div><div className="header-title"><h1 ref={headingRef}>{pageTitle}</h1><span>{page === 'timeline' ? 'ためこまずに、ここに置いていこう。' : page === 'search' ? 'あの日の気持ちを、見つける。' : page === 'ranking' ? 'あのときは、本当に腹が立った。' : page === 'thread' ? 'あの日の気持ちと、そのつづき。' : 'あなたに合った、心地よい場所に。'}</span></div></header>
       {page !== 'settings' && <BackupReminder hasData={allPosts.length > 0} oldestPostAt={allPosts[allPosts.length - 1]?.createdAt} onOpenSettings={() => navigate('settings')} />}
       {page === 'search' && <section className="search-panel"><div className="search-box"><Search size={20} /><input aria-label="日記を検索" placeholder="言葉や #タグで探す" value={search} onChange={event => setSearch(event.target.value)} /><button className="icon-button" aria-label="検索をクリア" onClick={() => { setSearch(''); setTag(''); }} disabled={!search && !tag}><X size={17} /></button></div><p>複数の言葉で絞り込み。#タグは完全一致で検索します。</p>{stats.tags.length > 0 && <div className="filter-tags">{stats.tags.map(value => <button key={normalizeTag(value.label)} className={tag === value.label ? 'selected' : ''} onClick={() => setTag(tag === value.label ? '' : value.label)}>#{value.label}<span>{value.count}</span></button>)}</div>}</section>}
-      {page !== 'settings' && <>
+      {page === 'thread' && <section className="thread-view" aria-label="返信のツリー">
+        {loadError ? <p className="loading-state" role="alert">日記を読み込めませんでした。タイムラインから再読み込みしてください。</p> : posts === undefined ? <p className="loading-state" role="status">スレッドを開いています…</p> : <>
+          <p className="thread-summary">{threadEntries.filter(entry => entry.post).length}件の投稿<span>返信を古い順につなげています</span></p>
+          <div className="thread-entries">{threadEntries.map(entry => <div key={entry.id} className={`thread-entry ${entry.depth > 0 ? 'is-reply' : ''} ${entry.id === threadId ? 'is-selected' : ''}`} data-thread-id={entry.id} data-thread-depth={entry.depth} style={{ marginLeft: `${Math.min(entry.depth, 3) * 12}px` }}>
+            {entry.depth > 1 && <p className="thread-depth"><Reply size={12} />{entry.depth}段目の返信</p>}
+            {entry.post ? renderPost(entry.post) : <div className="thread-deleted"><MessageCircle size={20} /><p>元の投稿は削除されています。</p><span>返信はそのまま残っています。</span></div>}
+          </div>)}</div>
+        </>}
+      </section>}
+      {page !== 'settings' && page !== 'thread' && <>
         <div className={`feed-toolbar ${page === 'timeline' ? 'timeline-toolbar' : ''}`}>
           {page === 'timeline' ? <div className="feed-tabs timeline-tabs" role="tablist" aria-label="タイムラインの並び順" onKeyDown={event => {
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -278,13 +348,14 @@ export default function App() {
         <section className="setting-section"><span className="section-kicker">YOUR DATA</span><h2>日記は、この端末の中に。</h2><div className="setting-info"><ShieldCheck size={22} /><div><strong>外部へ送信しません</strong><p>投稿はこのブラウザのIndexedDBに保存します。アカウント・広告・アクセス解析はありません。</p></div></div><div className="setting-info"><LockKeyhole size={22} /><div><strong>保存について知っておいてほしいこと</strong><p>日記自体は暗号化されていません。この端末を使える人からは閲覧できます。ブラウザの閲覧データ削除や端末の紛失で失われるため、大切な記録の唯一の保管先にはしないでください。</p></div></div><div className="storage-row"><span>保存領域の保護</span><span className={persistent ? 'green-text' : 'muted'}>{persistent ? '許可済み' : '未許可・未対応'}</span></div><button className="secondary-button" onClick={() => void requestPersistence()} disabled={persistent || persistenceBusy || !navigator.storage?.persist}>{persistenceBusy ? '確認中…' : persistent ? '保護が許可されています' : '保存領域の保護をリクエスト'}</button><p className="setting-note">ブラウザによっては許可されません。保護が有効でも、手動で削除したデータは戻せません。</p></section>
         <section className="setting-section"><span className="section-kicker">TAKE IT WITH YOU</span><h2>ホーム画面に、ひとりごとの場所。</h2><p>{offlineReady ? 'オフライン用の準備ができました。' : '初回はオンラインで開き、オフライン用ファイルの準備をお待ちください。'} 通信がなくても投稿・検索・閲覧ができます。</p>{installEvent ? <button className="secondary-button" onClick={async () => { try { await installEvent.prompt(); await installEvent.userChoice; setInstallEvent(undefined); } catch { notify('ブラウザのメニューからホーム画面に追加してください。'); } }}><Download size={16} />ホーム画面に追加</button> : <div className="install-guide"><strong>iPhone / Safari</strong><p>共有メニュー →「ホーム画面に追加」</p><strong>Android / Chrome</strong><p>メニュー →「ホーム画面に追加」または「アプリをインストール」</p></div>}</section>
         <BackupSettings onBusyChange={setBackupBusy} onDirtyChange={setBackupDirty} />
-        <span className="version-badge">v0.2.0</span>
+        <span className="version-badge">v0.3.0</span>
       </div>}
     </main>
     <aside className="right-sidebar"><div className="privacy-label"><span className="status-dot" /><LockKeyhole size={12} />誰にも見せない、わたしの場所</div><section className="stats-panel"><div className="panel-heading"><h2>あなたの記録</h2><span>MY LITTLE LOG</span></div><div className="stats-primary"><div><span>吐き出したひとりごと</span><strong>{numberLabel(allPosts.length)}<small>件</small></strong></div><span className="stats-icon"><Pencil size={21} strokeWidth={1.5} /></span></div><div className="stats-bottom"><div><span><AngerIcon size={13} /> 累計イライラ</span><strong>{numberLabel(stats.anger)}<small>回</small></strong></div><div><span><Sun size={13} /> 今日の投稿</span><strong>{numberLabel(stats.today)}<small>件</small></strong></div></div></section><section className="tag-panel"><div className="panel-heading"><h2>よく使うタグ</h2><Hash size={17} /></div>{stats.tags.length ? <div className="sidebar-tags">{stats.tags.slice(0, 8).map(value => <button key={normalizeTag(value.label)} onClick={() => searchTag(value.label)}>#{value.label}<span>{value.count}</span></button>)}</div> : <p className="muted tag-empty">あなたの気持ちに、目印を。<br />投稿に #タグ をつけてみよう。</p>}</section><section className="breather-card"><div className="breather-top"><Leaf size={15} /><span>ひと息メモ</span><span>01</span></div><SteamArt quiet /><h2>怒った日も、<br />ちゃんと生きた日。</h2><p>書いて、少しだけ手放して。<br />あとは、あったかいものでも。</p><span className="breather-line" /></section><div className="right-footer"><LockKeyhole size={13} /><p>気持ちはサーバーに送りません。<br />あなたの端末に、そっと保存します。</p></div><span className="made-for-you">余白を、こころに。<span>愚痴ったー © 2026</span></span></aside>
     {navigation(true)}<button className="floating-compose" disabled={backupBusy || mutationBusy || imageBusy} onClick={compose} aria-label="愚痴をこぼす"><Plus size={26} /></button>
-    {composerOpen && <Dialog title="愚痴をこぼす" className="compose-dialog" closeDisabled={saving || imageBusy} onClose={closeComposer} onEscape={() => { if (!saving && !imageBusy) { if (tagPickerOpen) closeTagPicker(); else closeComposer(); } }} action={<button className="primary-button submit-post" form="new-post-form" type="submit" disabled={composerDisabled || (!body.trim() && !draftImages.length)}>{saving ? '保存中…' : '吐き出す'}<ArrowUpRight size={17} /></button>}>
+    {composerOpen && <Dialog title={draftRelation?.kind === 'quote' ? '引用して投稿' : draftRelation?.kind === 'reply' ? '返信する' : '愚痴をこぼす'} className="compose-dialog" closeDisabled={saving || imageBusy} onClose={closeComposer} onEscape={() => { if (!saving && !imageBusy) { if (tagPickerOpen) closeTagPicker(); else closeComposer(); } }} action={<button className="primary-button submit-post" form="new-post-form" type="submit" disabled={composerDisabled || (!body.trim() && !draftImages.length)}>{saving ? '保存中…' : '吐き出す'}<ArrowUpRight size={17} /></button>}>
       <form id="new-post-form" className="composer" onSubmit={submit}>
+        {draftRelation && <div className="composer-reference"><PostReference post={postIndex.byId.get(draftRelation.postId)} kind={draftRelation.kind} /><button type="button" className="text-button" disabled={composerDisabled} onClick={() => { setDraftRelation(undefined); setComposeError(undefined); }}>{draftRelation.kind === 'quote' ? '引用をやめる' : '返信をやめる'}<X size={13} /></button></div>}
         <div className="composer-top">
           <div className="avatar"><Flame size={24} strokeWidth={1.7} /></div>
           <div className="composer-input">
@@ -314,6 +385,6 @@ export default function App() {
     {notice && <div className={`toast ${notice.error ? 'toast-error' : ''}`} role={notice.error ? 'alert' : 'status'}>{notice.error ? <WifiOff size={18} /> : <Check size={18} />}<span>{notice.message}</span><button aria-label="通知を閉じる" className="icon-button" onClick={() => setNotice(undefined)}><X size={16} /></button></div>}
     {needRefresh && <div className="update-banner"><span>新しいバージョンを使えます。{dirty ? '下書きを保存してから更新できます。' : ''}</span><button disabled={dirty || saving || mutationBusy || imageBusy || backupBusy} onClick={() => void updateServiceWorker(true)}>更新する</button></div>}
     {editing && <Dialog title="ひとりごとを編集" onClose={closeEditor} closeDisabled={mutationBusy || imageBusy}><form onSubmit={saveEdit}><label className="sr-only" htmlFor="edit-post">今の気持ち</label><textarea ref={editRef} id="edit-post" className="edit-textarea" value={editBody} onChange={event => setEditBody(event.target.value)} rows={6} disabled={mutationBusy || imageBusy} autoFocus /><ImagePicker images={editImages} onChange={setEditImages} disabled={mutationBusy || imageBusy} onBusyChange={setImageBusy} onError={message => notify(message, true)} /><p className="setting-note">投稿日時とイライラ値はそのまま。タグも更新されます。</p><div className="dialog-actions"><button type="submit" className="primary-button" disabled={mutationBusy || imageBusy || (!editBody.trim() && !editImages.length)}>{mutationBusy ? '保存中…' : '保存する'}<Check size={17} /></button></div></form></Dialog>}
-    {deleting && <Dialog title="このひとりごとを削除しますか？" onClose={() => { if (!mutationBusy) setDeleting(undefined); }}><p className="delete-explanation">削除した日記は元に戻せません。</p><blockquote className="delete-preview">{deleting.body}</blockquote><div className="dialog-actions"><button className="secondary-button" disabled={mutationBusy} onClick={() => setDeleting(undefined)}>キャンセル</button><button className="danger-button" disabled={mutationBusy} onClick={() => void confirmDelete()}>{mutationBusy ? '削除中…' : '削除する'}</button></div></Dialog>}
+    {deleting && <Dialog title="このひとりごとを削除しますか？" onClose={() => { if (!mutationBusy) setDeleting(undefined); }}><p className="delete-explanation">削除した日記は元に戻せません。引用投稿と返信は残ります。</p><blockquote className="delete-preview">{deleting.body}</blockquote><div className="dialog-actions"><button className="secondary-button" disabled={mutationBusy} onClick={() => setDeleting(undefined)}>キャンセル</button><button className="danger-button" disabled={mutationBusy} onClick={() => void confirmDelete()}>{mutationBusy ? '削除中…' : '削除する'}</button></div></Dialog>}
   </div>;
 }

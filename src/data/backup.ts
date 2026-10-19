@@ -1,11 +1,12 @@
 import Dexie from 'dexie';
 import { db, type DiaryDatabase } from './database';
 import { MAX_IMAGE_BYTES, MAX_IMAGE_SIDE, MAX_IMAGES_PER_POST, validatePreparedImage, type Attachment } from './images';
-import { assertAnger, extractTags, type Post } from './posts';
+import { assertAnger, assertPostRelation, extractTags, type Post } from './posts';
 
 const FORMAT = 'guchitter-backup';
 const FORMAT_VERSION = 1;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+type SupportedSchema = 2 | typeof SCHEMA_VERSION;
 const ITERATIONS = 600_000;
 const RESTORE_VARIANTS = 100;
 const MiB = 1024 * 1024;
@@ -28,7 +29,7 @@ export const BACKUP_LIMITS = Object.freeze({
 interface Envelope {
   format: typeof FORMAT;
   formatVersion: typeof FORMAT_VERSION;
-  schemaVersion: typeof SCHEMA_VERSION;
+  schemaVersion: SupportedSchema;
   kdf: { name: 'PBKDF2'; hash: 'SHA-256'; iterations: number; salt: string };
   cipher: { name: 'AES-GCM'; keyLength: 256; tagLength: 128; nonce: string };
   ciphertext: string;
@@ -225,7 +226,7 @@ function aad(envelope: Envelope): Uint8Array<ArrayBuffer> {
 function validateEnvelope(value: unknown): { envelope: Envelope; salt: Uint8Array<ArrayBuffer>; nonce: Uint8Array<ArrayBuffer>; ciphertext: Uint8Array<ArrayBuffer> } {
   const top = record(value, ['format', 'formatVersion', 'schemaVersion', 'kdf', 'cipher', 'ciphertext']);
   if (top.format !== FORMAT) invalid();
-  if (top.formatVersion !== FORMAT_VERSION || top.schemaVersion !== SCHEMA_VERSION) {
+  if (top.formatVersion !== FORMAT_VERSION || (top.schemaVersion !== 2 && top.schemaVersion !== SCHEMA_VERSION)) {
     throw new Error('このバックアップのバージョンには対応していません。アプリを更新してください。');
   }
   const kdf = record(top.kdf, ['name', 'hash', 'iterations', 'salt']);
@@ -249,8 +250,10 @@ async function deriveKey(password: string, salt: Uint8Array<ArrayBuffer>): Promi
   } finally { passwordBytes.fill(0); }
 }
 
-function validatePost(value: unknown): Post {
-  const post = record(value, ['id', 'body', 'tags', 'angerCount', 'createdAt', 'updatedAt', 'imageIds']);
+function validatePost(value: unknown, schema: SupportedSchema = SCHEMA_VERSION): Post {
+  const optional = schema === 3 && value && typeof value === 'object'
+    ? ['quotePostId', 'replyToId'].filter(key => Object.hasOwn(value, key)) : [];
+  const post = record(value, ['id', 'body', 'tags', 'angerCount', 'createdAt', 'updatedAt', 'imageIds', ...optional]);
   identifier(post.id);
   if (typeof post.body !== 'string') invalid();
   if (post.body.length > BACKUP_LIMITS.bodyLength) tooLarge();
@@ -266,8 +269,34 @@ function validatePost(value: unknown): Post {
   for (const id of post.imageIds) identifier(id);
   if (new Set(post.imageIds).size !== post.imageIds.length) invalid();
   if (post.body.trim() !== post.body || (!post.body && post.imageIds.length === 0)) invalid();
+  const relation: { quotePostId?: string; replyToId?: string } = {};
+  for (const key of optional) {
+    identifier(post[key]);
+    relation[key as keyof typeof relation] = post[key];
+  }
+  try { assertPostRelation(relation); } catch { return invalid(); }
   return { id: post.id, body: post.body, tags: [...post.tags], angerCount: post.angerCount,
-    createdAt: post.createdAt, updatedAt: post.updatedAt, imageIds: [...post.imageIds] };
+    createdAt: post.createdAt, updatedAt: post.updatedAt, imageIds: [...post.imageIds], ...relation };
+}
+
+/** Parent-first order without recursion, also rejecting self references or hostile cycles. */
+function relationOrder(posts: readonly Post[]): Post[] {
+  const byId = new Map(posts.map(post => [post.id, post]));
+  const children = new Map<string, Post[]>();
+  const roots: Post[] = [];
+  for (const post of posts) {
+    const target = post.quotePostId ?? post.replyToId;
+    if (target !== undefined && byId.has(target)) {
+      const list = children.get(target) ?? [];
+      list.push(post);
+      children.set(target, list);
+    } else roots.push(post);
+  }
+  for (let index = 0; index < roots.length; index += 1) {
+    for (const child of children.get(roots[index]!.id) ?? []) roots.push(child);
+  }
+  if (roots.length !== posts.length) invalid();
+  return roots;
 }
 
 function attachmentMetadata(value: unknown, serialized: boolean): Omit<Attachment, 'blob'> {
@@ -305,6 +334,7 @@ function validateRelationships(posts: readonly Post[], attachments: readonly Pic
       if (imageById.get(imageId)?.postId !== post.id) invalid();
     }
   }
+  relationOrder(posts);
 }
 
 function assertTotalImageBytes(images: readonly Pick<Attachment, 'byteLength'>[]): void {
@@ -339,12 +369,12 @@ async function digest(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   return toBase64(new Uint8Array(await requireCrypto().subtle.digest('SHA-256', bytes)));
 }
 
-async function decodePayload(value: unknown): Promise<VerifiedBackup> {
+async function decodePayload(value: unknown, schema: SupportedSchema): Promise<VerifiedBackup> {
   const payload = record(value, ['schemaVersion', 'exportedAt', 'posts', 'attachments']);
-  if (payload.schemaVersion !== SCHEMA_VERSION) invalid();
+  if (payload.schemaVersion !== schema) invalid();
   date(payload.exportedAt);
   assertCounts(payload.posts, payload.attachments);
-  const posts = payload.posts.map(validatePost);
+  const posts = payload.posts.map(value => validatePost(value, schema));
   const serializedImages = payload.attachments as unknown[];
   const attachments: Attachment[] = [];
   // Check ownership before decoding image bytes, and reject every orphan or missing image.
@@ -396,7 +426,7 @@ export async function decryptBackup(file: Blob, password: string): Promise<Verif
   if (plaintext.byteLength > BACKUP_LIMITS.payloadBytes) tooLarge();
   try {
     const payloadText = new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
-    return await decodePayload(parseStrictJson(payloadText));
+    return await decodePayload(parseStrictJson(payloadText), envelope.schemaVersion);
   } finally { new Uint8Array(plaintext).fill(0); }
 }
 
@@ -410,7 +440,7 @@ export async function exportBackup(password: string, database: DiaryDatabase = d
     posts: await database.posts.toArray(), attachments: await database.attachments.toArray(),
   }));
   assertCounts(snapshot.posts, snapshot.attachments);
-  const posts = snapshot.posts.map(validatePost);
+  const posts = snapshot.posts.map(value => validatePost(value));
   const metadata = snapshot.attachments.map(value => attachmentMetadata(value, false));
   assertTotalImageBytes(metadata);
   validateRelationships(posts, metadata);
@@ -455,6 +485,7 @@ function requireVerified(verified: VerifiedBackup): void {
 function samePost(a: Post, b: Post): boolean {
   return a.id === b.id && a.body === b.body && a.angerCount === b.angerCount && a.createdAt === b.createdAt
     && a.updatedAt === b.updatedAt && JSON.stringify(a.tags) === JSON.stringify(b.tags)
+    && a.quotePostId === b.quotePostId && a.replyToId === b.replyToId
     && JSON.stringify(a.imageIds) === JSON.stringify(b.imageIds);
 }
 
@@ -478,6 +509,7 @@ interface PreparedRestorePost {
 interface PreparedRestore {
   entries: PreparedRestorePost[];
   binary: Map<string, Uint8Array>;
+  missingSeeds: Map<string, string>;
 }
 
 interface RestoreEntry {
@@ -496,18 +528,27 @@ async function prepareRestore(verified: VerifiedBackup): Promise<PreparedRestore
     hashes.set(image.id, await digest(bytes));
   }
   const entries: PreparedRestorePost[] = [];
-  for (const post of verified.posts) {
+  const missingSeeds = new Map<string, string>();
+  const incomingIds = new Set(verified.posts.map(post => post.id));
+  for (const post of relationOrder(verified.posts)) {
     const images = post.imageIds.map(id => imageById.get(id)!);
     const fingerprint = encoder.encode(JSON.stringify([
       'guchitter-restore-v1',
       [post.id, post.body, post.tags, post.angerCount, post.createdAt, post.updatedAt, post.imageIds],
       images.map(image => [image.id, image.postId, image.mimeType, image.byteLength, image.width, image.height, image.createdAt, hashes.get(image.id)]),
+      ...(post.quotePostId ? [['quotePostId', post.quotePostId]] : []),
+      ...(post.replyToId ? [['replyToId', post.replyToId]] : []),
     ]));
     const hash = new Uint8Array(await requireCrypto().subtle.digest('SHA-256', fingerprint));
     const seed = Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('');
     entries.push({ post, images, seed });
+    const target = post.quotePostId ?? post.replyToId;
+    if (target !== undefined && !incomingIds.has(target) && !missingSeeds.has(target)) {
+      const missingHash = new Uint8Array(await requireCrypto().subtle.digest('SHA-256', encoder.encode(target)));
+      missingSeeds.set(target, Array.from(missingHash, byte => byte.toString(16).padStart(2, '0')).join(''));
+    }
   }
-  return { entries, binary };
+  return { entries, binary, missingSeeds };
 }
 
 function clonePostId(seed: string, variant: number): string {
@@ -560,7 +601,27 @@ async function planRestore(prepared: PreparedRestore, posts: Post[], images: Att
   let conflictingPosts = 0;
   let addedImages = 0;
   let requiredBytes = 0;
-  for (const entry of prepared.entries) {
+  const restoredIds = new Map<string, string>();
+  // A target omitted from the complete snapshot has been deleted. Never silently
+  // connect it to an unrelated existing row which happens to reuse that ID.
+  for (const [missingId, seed] of prepared.missingSeeds) {
+    let target = missingId;
+    if (reservedPostIds.has(target)) {
+      let variant = 0;
+      for (; variant < RESTORE_VARIANTS; variant += 1) {
+        target = `restore-missing-${seed}-${variant}`;
+        if (!reservedPostIds.has(target)) break;
+      }
+      if (variant === RESTORE_VARIANTS) throw new Error('削除済み投稿IDの競合が多いため復元できません。既存データは変更されていません。');
+    }
+    restoredIds.set(missingId, target);
+    reservedPostIds.add(target);
+  }
+  for (const source of prepared.entries) {
+    const remapped = { ...source.post };
+    if (remapped.quotePostId !== undefined) remapped.quotePostId = restoredIds.get(remapped.quotePostId)!;
+    if (remapped.replyToId !== undefined) remapped.replyToId = restoredIds.get(remapped.replyToId)!;
+    const entry: PreparedRestorePost = { ...source, post: remapped };
     let duplicate = false;
     // Search all bounded stable candidates before selecting a free one. A prior copy can
     // still exist when the original or an earlier edited/deleted copy left an ID gap.
@@ -572,6 +633,7 @@ async function planRestore(prepared: PreparedRestore, posts: Post[], images: Att
       const existing = postById.get(id);
       if (existing && await matchesCandidate(entry, existing, variant, imageById, prepared.binary, inTransaction)) {
         duplicate = true;
+        restoredIds.set(entry.post.id, id);
         break;
       }
     }
@@ -588,6 +650,7 @@ async function planRestore(prepared: PreparedRestore, posts: Post[], images: Att
       if (postVariant > RESTORE_VARIANTS) throw new Error('復元済みの競合が多いため追加できません。既存データは変更されていません。');
     }
     reservedPostIds.add(id);
+    restoredIds.set(entry.post.id, id);
     const restoredImages = entry.images.map((image, index): Attachment => {
       let imageId = image.id;
       if (postVariant !== 0 || imageById.has(imageId)) {

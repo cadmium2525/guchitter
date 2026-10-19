@@ -7,6 +7,26 @@ export interface Post {
   angerCount: string;
   createdAt: number;
   updatedAt: number;
+  quotePostId?: string;
+  replyToId?: string;
+}
+
+export interface PostRelation {
+  quotePostId?: string;
+  replyToId?: string;
+}
+
+/** A new post has one origin at most. Deleted origins remain as IDs for placeholders. */
+export function assertPostRelation(relation: PostRelation): void {
+  if (!relation || typeof relation !== 'object' || Array.isArray(relation)
+    || Object.keys(relation).some(key => key !== 'quotePostId' && key !== 'replyToId')) {
+    throw new Error('投稿の関連付けが正しくありません。');
+  }
+  const references = [relation.quotePostId, relation.replyToId].filter(value => value !== undefined);
+  if (references.length > 1 || references.some(value => typeof value !== 'string'
+    || !value || value.trim() !== value || /[\u0000-\u001f]/u.test(value))) {
+    throw new Error('引用または返信する投稿を1つ選んでください。');
+  }
 }
 
 const canonicalAngerPattern = /^(?:0|[1-9][0-9]*)$/;

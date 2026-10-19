@@ -64,6 +64,56 @@ describe('private diary persistence', () => {
     expect(await database.posts.get(post.id)).toEqual(post);
   });
 
+  it('upgrades v2 image posts without changing any saved records', async () => {
+    const legacy = new Dexie(database.name);
+    legacy.version(2).stores({ posts: '&id, createdAt, updatedAt, *tags', attachments: '&id, postId' });
+    const post: Post = { id: 'v2', body: '写真', imageIds: ['photo-v2'], tags: [], angerCount: '9', createdAt: 1, updatedAt: 2 };
+    const attachment = { ...image(), id: 'photo-v2', postId: post.id, createdAt: 1 };
+    await legacy.table('posts').add(post);
+    await legacy.table('attachments').add(attachment);
+    legacy.close();
+    expect(await database.posts.get(post.id)).toEqual(post);
+    expect(await database.attachments.get(attachment.id)).toEqual(attachment);
+    expect(await database.posts.where('replyToId').equals(post.id).count()).toBe(0);
+    expect(await database.posts.where('quotePostId').equals(post.id).count()).toBe(0);
+  });
+
+  it('persists quotes and nested replies, keeps their relationships on edits and origin deletion', async () => {
+    const origin = await createPost('元の記録', '4', database, [image()]);
+    const quote = await createPost('今なら笑える', '0', database, [], { quotePostId: origin.id });
+    const reply = await createPost('その後', '1', database, [], { replyToId: origin.id });
+    const nested = await createPost('', '0', database, [image()], { replyToId: reply.id });
+    expect(await database.posts.where('quotePostId').equals(origin.id).toArray()).toEqual([quote]);
+    expect(await database.posts.where('replyToId').equals(origin.id).toArray()).toEqual([reply]);
+    await updatePost(quote.id, 'あとからの感想', database);
+    await updatePost(reply.id, 'その後の記録', database);
+    await incrementPostAnger(reply.id, database);
+    expect((await database.posts.get(quote.id))!.quotePostId).toBe(origin.id);
+    expect((await database.posts.get(reply.id))!.replyToId).toBe(origin.id);
+    await deletePost(origin.id, database);
+    expect((await database.posts.get(quote.id))!.quotePostId).toBe(origin.id);
+    expect((await database.posts.get(reply.id))!.replyToId).toBe(origin.id);
+    expect(await database.posts.get(nested.id)).toEqual(nested);
+    expect(await database.attachments.count()).toBe(1);
+    database.close();
+    database = new DiaryDatabase(database.name);
+    expect((await database.posts.get(nested.id))!.replyToId).toBe(reply.id);
+  });
+
+  it('rejects missing, invalid or multiple origins without writing any post or image', async () => {
+    const origin = await createPost('元の記録', '0', database);
+    await expect(createPost('返信', '0', database, [image()], { replyToId: 'missing' })).rejects.toThrow('削除されています');
+    await expect(createPost('引用', '0', database, [], { quotePostId: '' })).rejects.toThrow();
+    await expect(createPost('両方', '0', database, [], { quotePostId: origin.id, replyToId: origin.id })).rejects.toThrow();
+    await expect(createPost('不正', '0', database, [], { quotePostId: 2 } as never)).rejects.toThrow();
+    expect(await database.posts.toArray()).toEqual([origin]);
+    expect(await database.attachments.count()).toBe(0);
+    vi.spyOn(database.attachments, 'bulkAdd').mockRejectedValueOnce(new Error('保存に失敗'));
+    await expect(createPost('返信写真', '0', database, [image()], { replyToId: origin.id })).rejects.toThrow('保存に失敗');
+    expect(await database.posts.toArray()).toEqual([origin]);
+    expect(await database.attachments.count()).toBe(0);
+  });
+
   it('edits the body and tags while preserving the count, id, and original date', async () => {
     const post = await createPost('元の #仕事', '42', database);
     await updatePost(post.id, '編集後の ＃休日 #散歩', database);

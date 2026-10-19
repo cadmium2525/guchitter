@@ -2,14 +2,16 @@ import Dexie, { type Table } from 'dexie';
 import { MAX_IMAGES_PER_POST, validatePreparedImage, type Attachment, type PreparedImage } from './images';
 import {
   assertAnger,
+  assertPostRelation,
   extractTags,
   incrementAnger,
   normalizePostBody,
   type Post,
+  type PostRelation,
 } from './posts';
 
 export const DATABASE_NAME = 'guchitter-local-diary';
-export const DATABASE_SCHEMA_VERSION = 2;
+export const DATABASE_SCHEMA_VERSION = 3;
 
 export class DiaryDatabase extends Dexie {
   posts!: Table<Post, string>;
@@ -20,13 +22,17 @@ export class DiaryDatabase extends Dexie {
     this.version(1).stores({
       posts: '&id, createdAt, updatedAt, *tags',
     });
-    this.version(DATABASE_SCHEMA_VERSION).stores({
+    this.version(2).stores({
       posts: '&id, createdAt, updatedAt, *tags',
       attachments: '&id, postId',
     }).upgrade(async (transaction) => {
       await transaction.table('posts').toCollection().modify((post: Post) => {
         post.imageIds = [];
       });
+    });
+    this.version(DATABASE_SCHEMA_VERSION).stores({
+      posts: '&id, createdAt, updatedAt, *tags, quotePostId, replyToId',
+      attachments: '&id, postId',
     });
   }
 }
@@ -57,7 +63,13 @@ export async function createPost(
   initialAnger = '0',
   database: DiaryDatabase = db,
   images: readonly PreparedImage[] = [],
+  relation: PostRelation = {},
 ): Promise<Post> {
+  assertPostRelation(relation);
+  const storedRelation = {
+    ...(relation.quotePostId !== undefined ? { quotePostId: relation.quotePostId } : {}),
+    ...(relation.replyToId !== undefined ? { replyToId: relation.replyToId } : {}),
+  };
   assertImageCount(images);
   const normalizedBody = normalizePostBody(body, images.length > 0);
   assertAnger(initialAnger);
@@ -73,8 +85,13 @@ export async function createPost(
     angerCount: initialAnger,
     createdAt: now,
     updatedAt: now,
+    ...storedRelation,
   };
   await database.transaction('rw', database.posts, database.attachments, async () => {
+    const targetId = storedRelation.quotePostId ?? storedRelation.replyToId;
+    if (targetId !== undefined && !await database.posts.get(targetId)) {
+      throw new Error('引用または返信する投稿が削除されています。');
+    }
     await database.posts.add(post);
     if (attachments.length) await database.attachments.bulkAdd(attachments);
   });

@@ -136,7 +136,7 @@ test('an encrypted file restores photos and tags without replacing existing diar
   await download.saveAs(path);
   const fileText = await readFile(path, 'utf8');
   const envelope = JSON.parse(fileText);
-  expect(envelope).toMatchObject({ format: 'guchitter-backup', formatVersion: 1, schemaVersion: 2, kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 600000 }, cipher: { name: 'AES-GCM', keyLength: 256, tagLength: 128 } });
+  expect(envelope).toMatchObject({ format: 'guchitter-backup', formatVersion: 1, schemaVersion: 3, kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 600000 }, cipher: { name: 'AES-GCM', keyLength: 256, tagLength: 128 } });
   expect(fileText).not.toContain('バックアップする写真');
   expect(fileText).not.toContain(password);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('guchitter-backup-preferences-v1') ?? '{}').lastConfirmedAt)).toBeUndefined();

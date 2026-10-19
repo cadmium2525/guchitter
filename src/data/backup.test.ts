@@ -54,7 +54,7 @@ async function keyFor(envelope: Record<string, any>): Promise<CryptoKey> {
 }
 
 /** Create authenticated-but-invalid input, proving payload validation adds to GCM authentication. */
-async function rewritePayload(blob: Blob, change: (payload: Record<string, any>) => void, raw?: (json: string) => string): Promise<Blob> {
+async function rewritePayload(blob: Blob, change: (payload: Record<string, any>) => void, raw?: (json: string) => string, schemaVersion?: number): Promise<Blob> {
   const envelope = await envelopeOf(blob);
   const key = await keyFor(envelope);
   const params = { name: 'AES-GCM', iv: new Uint8Array(Buffer.from(envelope.cipher.nonce, 'base64')),
@@ -62,6 +62,10 @@ async function rewritePayload(blob: Blob, change: (payload: Record<string, any>)
   const decrypted = await crypto.subtle.decrypt(params, key, new Uint8Array(Buffer.from(envelope.ciphertext, 'base64')));
   const payload = JSON.parse(new TextDecoder().decode(decrypted)) as Record<string, any>;
   change(payload);
+  if (schemaVersion !== undefined) {
+    envelope.schemaVersion = schemaVersion;
+    params.additionalData = headerBytes(envelope);
+  }
   const json = JSON.stringify(payload);
   const ciphertext = await crypto.subtle.encrypt(params, key, new TextEncoder().encode(raw ? raw(json) : json));
   envelope.ciphertext = Buffer.from(ciphertext).toString('base64');
@@ -75,7 +79,7 @@ describe('authenticated complete backup', () => {
     expect(result).toMatchObject({ postCount: 1, imageCount: 1 });
     expect(result.filename).toMatch(/^guchitter-.*\.guchitter-backup$/);
     const envelope = await envelopeOf(result.blob);
-    expect(envelope).toMatchObject({ format: 'guchitter-backup', formatVersion: 1, schemaVersion: 2,
+    expect(envelope).toMatchObject({ format: 'guchitter-backup', formatVersion: 1, schemaVersion: 3,
       kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 600_000 },
       cipher: { name: 'AES-GCM', keyLength: 256, tagLength: 128 } });
     expect(Buffer.from(envelope.kdf.salt, 'base64')).toHaveLength(16);
@@ -296,6 +300,144 @@ describe('authenticated complete backup', () => {
     hash.mockClear();
     await expect(decryptBackup(file, password)).rejects.toThrow('処理上限');
     expect(hash).not.toHaveBeenCalled();
+  });
+});
+
+describe('quoted and threaded backup relationships', () => {
+  it('reads legacy schema2 with its original authenticated header and preserves its exact records', async () => {
+    const post = await createPost('以前の写真 #仕事', '17', database, [image()]);
+    const file = (await exportBackup(password, database)).blob;
+    const legacy = await rewritePayload(file, payload => { payload.schemaVersion = 2; }, undefined, 2);
+    const verified = await decryptBackup(legacy, password);
+    expect(verified.posts).toEqual([post]);
+    const target = openDatabase();
+    expect(await restoreBackup(verified, target)).toEqual({ addedPosts: 1, addedImages: 1, skippedPosts: 0 });
+    expect(await target.posts.get(post.id)).toEqual(post);
+    const upgraded = await exportBackup(password, target);
+    expect((await envelopeOf(upgraded.blob)).schemaVersion).toBe(3);
+    expect((await decryptBackup(upgraded.blob, password)).posts).toEqual([post]);
+    const mismatched = await rewritePayload(file, payload => { payload.schemaVersion = 2; });
+    await expect(decryptBackup(mismatched, password)).rejects.toThrow();
+    const smuggled = await rewritePayload(file, payload => {
+      payload.schemaVersion = 2;
+      payload.posts[0].replyToId = 'deleted';
+    }, undefined, 2);
+    await expect(decryptBackup(smuggled, password)).rejects.toThrow();
+  });
+
+  it('round trips both relation kinds and nested image replies regardless of serialized order', async () => {
+    const origin = await createPost('以前の記録', '5', database);
+    const quote = await createPost('いまの感想 #思い出', '1', database, [], { quotePostId: origin.id });
+    const reply = await createPost('その後', '2', database, [], { replyToId: origin.id });
+    const nested = await createPost('', '0', database, [image()], { replyToId: reply.id });
+    const file = (await exportBackup(password, database)).blob;
+    const reversed = await rewritePayload(file, payload => { payload.posts = [nested, quote, reply, origin]; });
+    const verified = await decryptBackup(reversed, password);
+    expect(verified.posts).toEqual([nested, quote, reply, origin]);
+    const target = openDatabase();
+    expect(await restoreBackup(verified, target)).toEqual({ addedPosts: 4, addedImages: 1, skippedPosts: 0 });
+    for (const post of [origin, quote, reply, nested]) expect(await target.posts.get(post.id)).toEqual(post);
+    expect(await restoreBackup(verified, target)).toEqual({ addedPosts: 0, addedImages: 0, skippedPosts: 4 });
+  });
+
+  it('remaps child references to restored conflicting parents and stays idempotent through the entire tree', async () => {
+    const origin = await createPost('バックアップ時の親', '8', database, [image()]);
+    const reply = await createPost('返信', '0', database, [], { replyToId: origin.id });
+    const nested = await createPost('孫', '0', database, [], { replyToId: reply.id });
+    const quote = await createPost('引用', '0', database, [], { quotePostId: reply.id });
+    const verified = await decryptBackup((await exportBackup(password, database)).blob, password);
+    await updatePost(origin.id, '今の親', database);
+    expect(await getRestorePreview(verified, database)).toMatchObject({ addedPosts: 4, conflictingPosts: 4, duplicatePosts: 0 });
+    expect(await restoreBackup(verified, database)).toEqual({ addedPosts: 4, addedImages: 1, skippedPosts: 0 });
+    const posts = await database.posts.toArray();
+    const restoredOrigin = posts.find(post => post.body === origin.body)!;
+    const restoredReply = posts.find(post => post.body === reply.body && post.id !== reply.id)!;
+    const restoredNested = posts.find(post => post.body === nested.body && post.id !== nested.id)!;
+    const restoredQuote = posts.find(post => post.body === quote.body && post.id !== quote.id)!;
+    expect(restoredReply.replyToId).toBe(restoredOrigin.id);
+    expect(restoredNested.replyToId).toBe(restoredReply.id);
+    expect(restoredQuote.quotePostId).toBe(restoredReply.id);
+    expect((await database.posts.get(reply.id))!.replyToId).toBe(origin.id);
+    expect(await restoreBackup(verified, database)).toEqual({ addedPosts: 0, addedImages: 0, skippedPosts: 4 });
+    // A later parent edit creates another stable tree copy without modifying either older tree.
+    await updatePost(restoredOrigin.id, '復元した親の追記', database);
+    expect(await restoreBackup(verified, database)).toEqual({ addedPosts: 4, addedImages: 1, skippedPosts: 0 });
+    expect(await restoreBackup(verified, database)).toEqual({ addedPosts: 0, addedImages: 0, skippedPosts: 4 });
+  });
+
+  it('does not collapse distinct same-content identities or cross their reply targets', async () => {
+    const first = await createPost('同じ文章', '0', database);
+    const second = { ...first, id: 'separate-same-content' };
+    await database.posts.add(second);
+    const replyA = await createPost('同じ返信', '0', database, [], { replyToId: first.id });
+    const replyB = { ...replyA, id: 'separate-reply', replyToId: second.id };
+    await database.posts.add(replyB);
+    const verified = await decryptBackup((await exportBackup(password, database)).blob, password);
+    const target = openDatabase();
+    await target.posts.add({ ...first, body: '競合する親' });
+    expect(await restoreBackup(verified, target)).toEqual({ addedPosts: 4, addedImages: 0, skippedPosts: 0 });
+    const a = (await target.posts.get(replyA.id))!;
+    const b = (await target.posts.get(replyB.id))!;
+    expect(a.replyToId).not.toBe(first.id);
+    expect(b.replyToId).toBe(second.id);
+    expect(await target.posts.get(a.replyToId!)).toMatchObject({ body: first.body });
+    expect(await restoreBackup(verified, target)).toEqual({ addedPosts: 0, addedImages: 0, skippedPosts: 4 });
+  });
+
+  it('retains deleted origins as missing without linking them to unrelated current ID collisions', async () => {
+    const origin = await createPost('削除する親', '0', database);
+    const reply = await createPost('親なし返信', '0', database, [], { replyToId: origin.id });
+    const quote = await createPost('親なし引用', '0', database, [], { quotePostId: origin.id });
+    await deletePost(origin.id, database);
+    const verified = await decryptBackup((await exportBackup(password, database)).blob, password);
+    expect(verified.posts.find(post => post.id === reply.id)!.replyToId).toBe(origin.id);
+    const emptyTarget = openDatabase();
+    await restoreBackup(verified, emptyTarget);
+    expect((await emptyTarget.posts.get(reply.id))!.replyToId).toBe(origin.id);
+    const target = openDatabase();
+    const unrelated = { ...origin, body: 'IDだけが偶然同じ別記録' };
+    await target.posts.add(unrelated);
+    expect(await restoreBackup(verified, target)).toEqual({ addedPosts: 2, addedImages: 0, skippedPosts: 0 });
+    const restoredReply = (await target.posts.get(reply.id))!;
+    const restoredQuote = (await target.posts.get(quote.id))!;
+    expect(restoredReply.replyToId).toMatch(/^restore-missing-[a-f0-9]{64}-0$/);
+    expect(restoredQuote.quotePostId).toBe(restoredReply.replyToId);
+    expect(await target.posts.get(restoredReply.replyToId!)).toBeUndefined();
+    expect(await target.posts.get(origin.id)).toEqual(unrelated);
+    expect(await restoreBackup(verified, target)).toEqual({ addedPosts: 0, addedImages: 0, skippedPosts: 2 });
+    const nextSnapshot = await decryptBackup((await exportBackup(password, target)).blob, password);
+    const fresh = openDatabase();
+    await restoreBackup(nextSnapshot, fresh);
+    expect((await fresh.posts.get(reply.id))!.replyToId).toBe(restoredReply.replyToId);
+  });
+
+  it('rejects invalid relation fields and cycles before exposing a restore preview', async () => {
+    const first = await createPost('親', '0', database);
+    const second = await createPost('子', '0', database, [], { replyToId: first.id });
+    const file = (await exportBackup(password, database)).blob;
+    const variants: Array<(payload: Record<string, any>) => void> = [
+      p => { p.posts[0].replyToId = ''; },
+      p => { p.posts[0].quotePostId = null; },
+      p => { p.posts[0].replyToId = 'x'.repeat(129); },
+      p => { p.posts[0].replyToId = p.posts[0].id; },
+      p => { const child = p.posts.find((post: { id: string }) => post.id === second.id); child.quotePostId = first.id; },
+      p => { const parent = p.posts.find((post: { id: string }) => post.id === first.id); parent.quotePostId = second.id; },
+    ];
+    for (const change of variants) await expect(decryptBackup(await rewritePayload(file, change), password)).rejects.toThrow();
+    expect(await database.posts.count()).toBe(2);
+  }, 15_000);
+
+  it('rolls back a whole remapped tree when a child write fails', async () => {
+    const origin = await createPost('親', '0', database);
+    await createPost('子', '0', database, [image()], { replyToId: origin.id });
+    const verified = await decryptBackup((await exportBackup(password, database)).blob, password);
+    const target = openDatabase();
+    const current = { ...origin, body: '既存の親' };
+    await target.posts.add(current);
+    vi.spyOn(target.attachments, 'add').mockRejectedValueOnce(new Error('容量不足'));
+    await expect(restoreBackup(verified, target)).rejects.toThrow('容量不足');
+    expect(await target.posts.toArray()).toEqual([current]);
+    expect(await target.attachments.count()).toBe(0);
   });
 });
 
