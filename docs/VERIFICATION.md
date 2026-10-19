@@ -1,5 +1,16 @@
 # 検証記録
 
+## タグの重複表示の解消
+
+2026-10-20 に検証。投稿カードの本文からタグを隠し、色付きのタグボタンだけを表示する。タグのみの行と空になる本文欄も表示しない。IndexedDB の原文・タグ・スキーマは維持し、編集フォームと検索には原文を使う。
+
+- 型チェック、基本テスト 37 件、本番ビルド・Service Worker 生成：PASS。
+- Chrome デスクトップ、Android 相当、WebKit / iPhone 相当：`/guchitter/` で E2E 計 27 件 PASS。
+- 行内・別行のタグ非表示、タグのみの投稿、色付きタグの絞り込み、原文保存・編集・再読み込み：E2E PASS。
+- 全角＃・Unicode タグ、改行・空白の扱い：基本テスト PASS。スマートフォン幅とデスクトップ幅の画像も目視確認した。
+- [スマートフォン幅のタグ表示](screenshots/tags-single-display-mobile.png)。架空のテスト日記を使用している。
+- iPhone Safari / Android Chrome 実機：NOT RUN。配備状況は [Actions](https://github.com/cadmium2525/guchitter/actions/workflows/deploy.yml) で確認する。
+
 ## カウンターアイコンの変更
 
 2026-10-20 に検証。投稿カード、投稿前、累計イライラのカウンターを 💢 に変更した。ロゴの炎は維持し、ランキングの説明文を表示に合わせた。保存データや加算処理は変更していない。

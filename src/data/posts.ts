@@ -80,6 +80,26 @@ export function extractTags(body: string): string[] {
   return tags;
 }
 
+/** Hide inline tags on cards only; retain the original body for editing and search. */
+export function stripTagsForDisplay(body: string): string {
+  return body.split(/\r\n?|\n/).flatMap(line => {
+    const parts: string[] = [];
+    let cursor = 0;
+    for (const match of line.matchAll(tagPattern)) {
+      parts.push(line.slice(cursor, match.index));
+      cursor = match.index + match[0].length;
+    }
+    if (cursor === 0) return [line];
+    parts.push(line.slice(cursor));
+    const text = parts.reduce((visible, part) => {
+      // Keep a separator between surrounding words without doubling its spaces.
+      return visible + (/[^\S\r\n]$/.test(visible) ? part.replace(/^[^\S\r\n]+/, '') : part);
+    }, '');
+    // A line used only for tags does not leave a blank gap in the card.
+    return text.trim() ? [text.trimEnd()] : [];
+  }).join('\n').trim();
+}
+
 export function normalizePostBody(body: string): string {
   if (typeof body !== 'string' || body.trim().length === 0) {
     throw new Error('今の気持ちを入力してください。');

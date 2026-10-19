@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 import { liveQuery } from 'dexie';
 import { useRegisterSW } from 'virtual:pwa-register/react';
 import { ArrowDownWideNarrow, ArrowUpRight, Check, ChevronRight, Download, Flame, Hash, Home, Leaf, LockKeyhole, Monitor, Moon, MoreHorizontal, Pencil, Plus, Search, Settings, ShieldCheck, Sun, Trash2, Trophy, WifiOff, X } from 'lucide-react';
-import { compareAnger, createPost, db, deletePost, incrementAnger, incrementPostAnger, normalizeTag, totalAnger, updatePost, type Post } from './data';
+import { compareAnger, createPost, db, deletePost, incrementAnger, incrementPostAnger, normalizeTag, stripTagsForDisplay, totalAnger, updatePost, type Post } from './data';
 import { createTimelineSeed, orderTimeline, type TimelineMode } from './data/timeline';
 import { getTagUsage, hasBodyTag } from './data/tags';
 
@@ -62,6 +62,7 @@ function PostCard({ post, rank, onTag, onEdit, onDelete, onError }: { post: Post
   const [menuOpen, setMenuOpen] = useState(false);
   const [pulse, setPulse] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
+  const displayBody = stripTagsForDisplay(post.body);
   useEffect(() => {
     if (!menuOpen) return;
     const close = (event: PointerEvent) => { if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false); };
@@ -75,7 +76,7 @@ function PostCard({ post, rank, onTag, onEdit, onDelete, onError }: { post: Post
     <div className="avatar"><Flame size={23} strokeWidth={1.7} /></div>
     <div className="post-main">
       <div className="post-head"><span className="post-author">わたし</span><span className="post-private"><LockKeyhole size={11} /> 自分だけ</span><span className="time-dot">·</span><time dateTime={new Date(post.createdAt).toISOString()} title={new Date(post.createdAt).toLocaleString('ja-JP')}>{timeLabel(post.createdAt)}</time><div className="post-menu" ref={menuRef}><button className="icon-button" aria-label="投稿のメニュー" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><MoreHorizontal size={20} /></button>{menuOpen && <div className="dropdown"><button onClick={() => { setMenuOpen(false); onEdit(post); }}><Pencil size={16} />編集</button><button className="danger-text" onClick={() => { setMenuOpen(false); onDelete(post); }}><Trash2 size={16} />削除</button></div>}</div></div>
-      <p className="post-body">{post.body}</p>
+      {displayBody && <p className="post-body">{displayBody}</p>}
       {post.tags.length > 0 && <div className="post-tags">{post.tags.map(tag => <button key={normalizeTag(tag)} onClick={() => onTag(tag)}>#{tag}</button>)}</div>}
       <div className="post-footer"><button className={`anger-button ${post.angerCount !== '0' ? 'has-anger' : ''}`} aria-label="イライラを1増やす" onClick={tap}><span key={pulse} className={pulse ? 'anger-pop' : ''}><AngerIcon /></span><span className="anger-value">{numberLabel(post.angerCount)}</span><span className="tap-hint">わかる、あのイライラ</span></button></div>
     </div>

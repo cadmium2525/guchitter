@@ -4,6 +4,7 @@ import {
   extractTags,
   incrementAnger,
   normalizePostBody,
+  stripTagsForDisplay,
   totalAnger,
 } from './posts';
 
@@ -45,5 +46,20 @@ describe('post text', () => {
   it('rejects empty content and keeps meaningful whitespace inside the body', () => {
     expect(() => normalizePostBody(' \n\t　')).toThrow();
     expect(normalizePostBody('  一行目\n\n  二行目  ')).toBe('一行目\n\n  二行目');
+  });
+
+  it('shows prose without inline tags or tag-only lines, keeping original paragraph spacing', () => {
+    expect(stripTagsForDisplay('寝てほしい #育児')).toBe('寝てほしい');
+    expect(stripTagsForDisplay('はよねろ\n#育児')).toBe('はよねろ');
+    expect(stripTagsForDisplay('前半 #仕事 #日常 後半')).toBe('前半 後半');
+    expect(stripTagsForDisplay('一行目\n\n  二行目\n＃育児')).toBe('一行目\n\n  二行目');
+    expect(stripTagsForDisplay('上\r\n#育児\r\n下')).toBe('上\n下');
+  });
+
+  it('uses the saved tag syntax, leaving ordinary hash symbols and non-tag text intact', () => {
+    expect(stripTagsForDisplay('＃Ｃｏｆｆｅｅ #cafe\u0301 #ひと休み_2')).toBe('');
+    expect(stripTagsForDisplay('本文  の空白\n  字下げ')).toBe('本文  の空白\n  字下げ');
+    expect(stripTagsForDisplay('C# や #、＃ は記号')).toBe('C# や #、＃ は記号');
+    expect(stripTagsForDisplay('今日は #仕事！明日は #休日。')).toBe('今日は ！明日は 。');
   });
 });

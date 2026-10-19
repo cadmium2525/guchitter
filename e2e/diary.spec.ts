@@ -11,7 +11,10 @@ function visibleButton(page: Page, name: string) {
 }
 
 function postCard(page: Page, body: string) {
-  return page.getByRole('article').filter({ hasText: body });
+  // These fixtures append tags after " #"; identify the card by its prose,
+  // independently of how the application parses or renders hashtag tokens.
+  const prose = body.split(' #', 1)[0];
+  return page.getByRole('article').filter({ has: page.locator('.post-body').filter({ hasText: prose }) });
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -29,7 +32,7 @@ async function openComposer(page: Page) {
   return dialog;
 }
 
-async function submitPost(page: Page, body: string) {
+async function submitPost(page: Page, body: string, prose = body) {
   const dialog = await openComposer(page);
   const input = dialog.getByRole('textbox', { name: '今の気持ち', exact: true });
   await expect(input).toBeEditable();
@@ -39,7 +42,7 @@ async function submitPost(page: Page, body: string) {
   await expect(submit).toBeEnabled();
   await submit.click();
   await expect(dialog).not.toBeVisible();
-  await expect(postCard(page, body)).toHaveCount(1);
+  await expect(postCard(page, prose)).toHaveCount(1);
 }
 
 async function storedPosts(page: Page): Promise<StoredPost[]> {
@@ -103,6 +106,8 @@ test('a fresh diary persists text, tags, and every anger tap after reload', asyn
   const body = 'また会議が長かった。でも今日は書いて手放す。 #仕事 #日常';
   await submitPost(page, body);
   const card = postCard(page, body);
+  await expect(card.locator('.post-body')).toHaveText('また会議が長かった。でも今日は書いて手放す。');
+  await expect(card.locator('.post-tags').getByRole('button')).toHaveText(['#仕事', '#日常']);
   const angerButton = card.getByRole('button', { name: 'イライラを1増やす', exact: true });
   for (let tap = 0; tap < 10; tap += 1) await angerButton.click();
 
@@ -312,8 +317,10 @@ test('timeline tabs show newest posts or a stable random selection of every post
 
 test('search and ranking find the locally written diary entries', async ({ page }) => {
   await page.goto('./');
-  const workBody = '電車も会議もぎゅうぎゅうだった。 #仕事 #日常';
-  const otherBody = '買ったアイスが帰り道で溶けた。 #おやつ';
+  const workProse = '電車も会議もぎゅうぎゅうだった。';
+  const otherProse = '買ったアイスが帰り道で溶けた。';
+  const workBody = `${workProse} #仕事 #日常`;
+  const otherBody = `${otherProse} #おやつ`;
   await submitPost(page, workBody);
   await submitPost(page, otherBody);
   for (let tap = 0; tap < 3; tap += 1) {
@@ -326,7 +333,7 @@ test('search and ranking find the locally written diary entries', async ({ page 
   const searchSort = page.getByRole('combobox', { name: '並び順', exact: true });
   await expect(searchSort).toBeVisible();
   await searchSort.selectOption('oldest');
-  await expect(page.getByRole('article')).toContainText([workBody, otherBody]);
+  await expect(page.getByRole('article')).toContainText([workProse, otherProse]);
   const search = page.getByLabel('日記を検索', { exact: true });
   await search.fill('ぎゅうぎゅう');
   await expect(postCard(page, workBody)).toBeVisible();
@@ -336,7 +343,7 @@ test('search and ranking find the locally written diary entries', async ({ page 
   await expect(postCard(page, workBody)).toHaveCount(0);
 
   await visibleButton(page, 'イライラランキング').click();
-  await expect(page.getByRole('article').first()).toContainText(workBody);
+  await expect(page.getByRole('article').first()).toContainText(workProse);
   await expect(postCard(page, workBody).getByText('3', { exact: true })).toBeVisible();
 });
 
@@ -350,6 +357,7 @@ test('editing updates the stored text and tags, and deletion requires confirmati
   await postCard(page, original).getByRole('button', { name: '投稿のメニュー', exact: true }).click();
   await visibleButton(page, '編集').click();
   const editor = page.getByRole('dialog', { name: 'ひとりごとを編集', exact: true });
+  await expect(editor.getByRole('textbox', { name: '今の気持ち', exact: true })).toHaveValue(original);
   await editor.getByRole('textbox', { name: '今の気持ち', exact: true }).fill(edited);
   await editor.getByRole('button', { name: '保存する', exact: true }).click();
   await expect(editor).not.toBeVisible();
@@ -375,6 +383,54 @@ test('editing updates the stored text and tags, and deletion requires confirmati
   await page.reload();
   await expect(page.getByRole('article')).toHaveCount(0);
   expect(await storedPosts(page)).toEqual([]);
+});
+
+test('post cards show each tag only in the colored tag list while preserving the original diary', async ({ page }) => {
+  await page.goto('./');
+  const inlineProse = '片づけたそばから、おもちゃが増える。';
+  const inlineBody = `${inlineProse} #育児`;
+  const newlineProse = '寝かしつけでもうひとがんばり。';
+  const newlineBody = `${newlineProse}\n#育児`;
+  await submitPost(page, inlineBody);
+  await submitPost(page, newlineBody, newlineProse);
+
+  for (const prose of [inlineProse, newlineProse]) {
+    const card = postCard(page, prose);
+    await expect(card.locator('.post-body')).toHaveText(prose);
+    await expect(card.getByText('#育児', { exact: true })).toHaveCount(1);
+    await expect(card.locator('.post-tags').getByRole('button', { name: '#育児', exact: true })).toBeVisible();
+  }
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: test.info().outputPath('tags-single-display.png'), fullPage: true });
+
+  const composer = await openComposer(page);
+  await composer.getByRole('textbox', { name: '今の気持ち', exact: true }).fill('#仕事');
+  await composer.getByRole('button', { name: '吐き出す', exact: true }).click();
+  await expect(composer).not.toBeVisible();
+  await expect(page.getByRole('article')).toHaveCount(3);
+  const tagOnlyCard = page.getByRole('article').first();
+  await expect(tagOnlyCard.locator('.post-body')).toHaveCount(0);
+  await expect(tagOnlyCard.locator('.post-tags').getByRole('button')).toHaveText(['#仕事']);
+  expect(await storedPosts(page)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ body: inlineBody, tags: ['育児'] }),
+    expect.objectContaining({ body: newlineBody, tags: ['育児'] }),
+    expect.objectContaining({ body: '#仕事', tags: ['仕事'] }),
+  ]));
+
+  await postCard(page, inlineProse).locator('.post-tags').getByRole('button', { name: '#育児', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'タグの絞り込みを解除', exact: true })).toBeVisible();
+  await expect(page.getByRole('article')).toHaveCount(2);
+  await expect(page.getByRole('article').locator('.post-body')).toHaveText([newlineProse, inlineProse]);
+  await postCard(page, inlineProse).getByRole('button', { name: '投稿のメニュー', exact: true }).click();
+  await visibleButton(page, '編集').click();
+  const editor = page.getByRole('dialog', { name: 'ひとりごとを編集', exact: true });
+  await expect(editor.getByRole('textbox', { name: '今の気持ち', exact: true })).toHaveValue(inlineBody);
+  await editor.getByRole('button', { name: '閉じる', exact: true }).click();
+  await page.reload();
+  await expect(page.getByRole('article')).toHaveCount(3);
+  await expect(postCard(page, inlineProse).locator('.post-body')).toHaveText(inlineProse);
+  await expect(postCard(page, newlineProse).locator('.post-body')).toHaveText(newlineProse);
+  await expect(page.getByRole('article').first().locator('.post-body')).toHaveCount(0);
 });
 
 test('the cached production app reopens, reads, and writes while offline without external requests', async ({ page, context, baseURL }) => {
