@@ -3,6 +3,7 @@ export interface Post {
   id: string;
   body: string;
   tags: string[];
+  imageIds: string[];
   angerCount: string;
   createdAt: number;
   updatedAt: number;
@@ -100,9 +101,9 @@ export function stripTagsForDisplay(body: string): string {
   }).join('\n').trim();
 }
 
-export function normalizePostBody(body: string): string {
-  if (typeof body !== 'string' || body.trim().length === 0) {
-    throw new Error('今の気持ちを入力してください。');
+export function normalizePostBody(body: string, hasImages = false): string {
+  if (typeof body !== 'string' || (!hasImages && body.trim().length === 0)) {
+    throw new Error('今の気持ちか画像を追加してください。');
   }
   return body.trim();
 }

@@ -1,0 +1,47 @@
+.backup-settings>p{line-height:1.9}
+.backup-note{display:flex;align-items:flex-start;gap:9px;margin:17px 0;padding:14px;border-radius:10px;background:var(--accent-soft);color:var(--text)}
+.backup-note>svg{color:var(--accent);margin-top:2px;flex-shrink:0}
+.backup-note p{font-size:11px;line-height:1.9}
+.backup-panel{border:1px solid var(--line);border-radius:12px;padding:18px;margin-top:18px;min-width:0}
+.backup-panel h3{font-size:13px;line-height:1.7;margin:0 0 13px;font-weight:700}
+.backup-panel h4{font-size:12px;line-height:1.7;margin:0 0 13px}
+.backup-form{display:flex;flex-direction:column;gap:8px}
+.backup-form label,.backup-reminder-settings>label{font-size:11px;line-height:1.7;font-weight:600}
+.backup-form label:not(:first-child){margin-top:8px}
+.backup-form input,.backup-reminder-settings select{width:100%;min-height:44px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--field);color:var(--text);font-size:16px;min-width:0}
+.backup-form input[type=file]{font-size:12px;line-height:1.8;padding:8px;overflow:hidden}
+.backup-form input[type=file]::file-selector-button{min-height:34px;padding:5px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--text);font:inherit;margin-right:9px;cursor:pointer}
+.backup-help{font-size:10px;line-height:1.9;color:var(--muted);margin:3px 0 8px}
+.backup-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px}
+.backup-actions button,.backup-confirm-saved,.backup-cancel{min-height:44px;font-size:11px}
+.backup-actions .primary-button{border-radius:8px;padding:12px 16px}
+.backup-actions .secondary-button,.backup-confirm-saved{padding:11px 14px}
+.backup-file{display:flex;gap:10px;align-items:flex-start;padding:4px 0 7px}
+.backup-file>svg{color:var(--green);margin-top:2px}
+.backup-file>div{display:flex;flex-direction:column;gap:7px;min-width:0}
+.backup-file strong{font-size:11px;line-height:1.8;overflow-wrap:anywhere}
+.backup-file span{font-size:10px;line-height:1.7;color:var(--muted)}
+.backup-prepared>.backup-help{margin-top:13px}
+.backup-confirm-saved{margin-top:8px;color:var(--green);border-color:var(--green)}
+.backup-cancel{display:inline-flex;align-items:center;gap:6px;color:var(--muted);padding:8px 4px;text-align:left}
+.backup-prepared>.backup-cancel{display:flex;margin-top:7px}
+.backup-cancel:hover:enabled{color:var(--text)}
+.backup-message{display:flex;gap:7px;align-items:flex-start;font-size:11px;line-height:1.9;padding:11px 13px;border-radius:8px;background:var(--green-soft);margin-top:13px;overflow-wrap:anywhere}
+.backup-message>svg{margin-top:2px;flex-shrink:0}
+.backup-error{background:var(--accent-soft);color:#ac5148}
+:root[data-theme=dark] .backup-error{color:#f0a398}
+.backup-restore-preview dl{margin:0;display:flex;flex-direction:column;gap:9px;font-size:11px;line-height:1.8}
+.backup-restore-preview dl>div{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:8px}
+.backup-restore-preview dt{color:var(--muted)}
+.backup-restore-preview dd{margin:0;text-align:right;overflow-wrap:anywhere}
+.backup-restore-preview>.backup-help{margin-top:12px}
+.backup-reminder-settings{margin-top:24px;display:flex;flex-direction:column;align-items:flex-start;gap:7px}
+.backup-reminder-settings select{max-width:200px}
+.backup-reminder-settings .backup-help{margin:0}
+.backup-reminder{display:flex;align-items:center;gap:10px;padding:13px 18px;background:var(--green-soft);border-bottom:1px solid var(--line)}
+.backup-reminder>svg{color:var(--green)}
+.backup-reminder>div{flex:1;min-width:0}
+.backup-reminder strong{display:block;font-size:11px;line-height:1.8}
+.backup-reminder p{font-size:10px;line-height:1.8;color:var(--muted);margin-top:2px}
+.backup-reminder button{font-size:11px;min-height:44px;flex-shrink:0;color:var(--green);font-weight:650;padding:8px 4px}
+@media(max-width:700px){.backup-panel{padding:16px 13px}.backup-panel h3{font-size:14px}.backup-note p,.backup-form label,.backup-reminder-settings>label{font-size:12px}.backup-help,.backup-file span{font-size:11px}.backup-message,.backup-restore-preview dl{font-size:12px}.backup-actions{gap:8px}.backup-actions button,.backup-confirm-saved,.backup-cancel{font-size:12px}.backup-restore-preview dd{text-align:left}.backup-reminder{padding:12px 17px}.backup-reminder strong{font-size:12px}.backup-reminder p{font-size:10px}.backup-reminder button{font-size:11px}}

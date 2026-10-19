@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { liveQuery } from 'dexie';
 import { useRegisterSW } from 'virtual:pwa-register/react';
-import { ArrowDownWideNarrow, ArrowUpRight, Check, ChevronRight, Download, Flame, Hash, Home, Leaf, LockKeyhole, Monitor, Moon, MoreHorizontal, Pencil, Plus, Search, Settings, ShieldCheck, Sun, Trash2, Trophy, WifiOff, X } from 'lucide-react';
+import { ArrowDownWideNarrow, ArrowUpRight, Check, ChevronRight, Download, Flame, Hash, Home, Leaf, LockKeyhole, Monitor, Moon, MoreHorizontal, Pencil, Plus, Search, Settings, ShieldCheck, Sun, Trash2, WifiOff, X } from 'lucide-react';
 import { compareAnger, createPost, db, deletePost, incrementAnger, incrementPostAnger, normalizeTag, stripTagsForDisplay, totalAnger, updatePost, type Post } from './data';
 import { createTimelineSeed, orderTimeline, type TimelineMode } from './data/timeline';
 import { getTagUsage, hasBodyTag } from './data/tags';
+import { ImagePicker, PostImages, type ImageItem } from './components/Images';
+import { type PreparedImage } from './data/images';
+import { BackupReminder, BackupSettings } from './components/BackupSettings';
 
 type Page = 'timeline' | 'search' | 'ranking' | 'settings';
 type Theme = 'light' | 'dark' | 'system';
@@ -77,6 +80,7 @@ function PostCard({ post, rank, onTag, onEdit, onDelete, onError }: { post: Post
     <div className="post-main">
       <div className="post-head"><span className="post-author">わたし</span><span className="post-private"><LockKeyhole size={11} /> 自分だけ</span><span className="time-dot">·</span><time dateTime={new Date(post.createdAt).toISOString()} title={new Date(post.createdAt).toLocaleString('ja-JP')}>{timeLabel(post.createdAt)}</time><div className="post-menu" ref={menuRef}><button className="icon-button" aria-label="投稿のメニュー" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><MoreHorizontal size={20} /></button>{menuOpen && <div className="dropdown"><button onClick={() => { setMenuOpen(false); onEdit(post); }}><Pencil size={16} />編集</button><button className="danger-text" onClick={() => { setMenuOpen(false); onDelete(post); }}><Trash2 size={16} />削除</button></div>}</div></div>
       {displayBody && <p className="post-body">{displayBody}</p>}
+      {post.imageIds?.length > 0 && <PostImages postId={post.id} imageIds={post.imageIds} />}
       {post.tags.length > 0 && <div className="post-tags">{post.tags.map(tag => <button key={normalizeTag(tag)} onClick={() => onTag(tag)}>#{tag}</button>)}</div>}
       <div className="post-footer"><button className={`anger-button ${post.angerCount !== '0' ? 'has-anger' : ''}`} aria-label="イライラを1増やす" onClick={tap}><span key={pulse} className={pulse ? 'anger-pop' : ''}><AngerIcon /></span><span className="anger-value">{numberLabel(post.angerCount)}</span><span className="tap-hint">わかる、あのイライラ</span></button></div>
     </div>
@@ -90,6 +94,10 @@ export default function App() {
   const [loadError, setLoadError] = useState(false);
   const [retry, setRetry] = useState(0);
   const [body, setBody] = useState('');
+  const [draftImages, setDraftImages] = useState<ImageItem[]>([]);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupDirty, setBackupDirty] = useState(false);
   const [initialAnger, setInitialAnger] = useState('0');
   const [composerOpen, setComposerOpen] = useState(false);
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
@@ -104,6 +112,7 @@ export default function App() {
   const [timelineSeed, setTimelineSeed] = useState(createTimelineSeed);
   const [editing, setEditing] = useState<Post>();
   const [editBody, setEditBody] = useState('');
+  const [editImages, setEditImages] = useState<ImageItem[]>([]);
   const [deleting, setDeleting] = useState<Post>();
   const [mutationBusy, setMutationBusy] = useState(false);
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
@@ -116,8 +125,9 @@ export default function App() {
   const editRef = useRef<HTMLTextAreaElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const allPosts = posts ?? [];
-  const composerDisabled = saving || posts === undefined || loadError;
-  const dirty = body.length > 0 || initialAnger !== '0' || Boolean(editing && editBody !== editing.body);
+  const composerDisabled = saving || imageBusy || backupBusy || posts === undefined || loadError;
+  const editDirty = Boolean(editing && (editBody !== editing.body || editImages.length !== (editing.imageIds?.length ?? 0) || editImages.some((image, index) => !('id' in image) || image.id !== editing.imageIds[index])));
+  const dirty = body.length > 0 || initialAnger !== '0' || draftImages.length > 0 || imageBusy || backupDirty || editDirty;
   const { needRefresh: [needRefresh], offlineReady: [offlineReady], updateServiceWorker } = useRegisterSW({ onRegisterError() { setNotice({ message: 'オフライン用ファイルの準備に失敗しました。オンラインで再読み込みしてください。', error: true }); } });
 
   useEffect(() => {
@@ -171,9 +181,9 @@ export default function App() {
   }, [posts, page, search, tag, sort, timelineMode, timelineSeed]);
 
   function notify(message: string, error = false) { setNotice({ message, error }); }
-  function navigate(next: Page) { setPage(next); setTag(''); setSearch(''); window.scrollTo({ top: 0 }); }
-  function compose() { setComposeError(undefined); setTagPickerOpen(false); setTagQuery(''); setComposerOpen(true); }
-  function closeComposer() { if (!saving) { setComposerOpen(false); setTagPickerOpen(false); setTagQuery(''); } }
+  function navigate(next: Page) { if (backupBusy || mutationBusy || saving || imageBusy) return; setPage(next); setTag(''); setSearch(''); window.scrollTo({ top: 0 }); }
+  function compose() { if (backupBusy || mutationBusy || imageBusy) return; setComposeError(undefined); setTagPickerOpen(false); setTagQuery(''); setComposerOpen(true); }
+  function closeComposer() { if (!saving && !imageBusy) { setComposerOpen(false); setTagPickerOpen(false); setTagQuery(''); } }
   function closeTagPicker() { setTagPickerOpen(false); setTagQuery(''); tagButtonRef.current?.focus(); }
   function selectTimeline(mode: TimelineMode) { if (mode === 'random') setTimelineSeed(createTimelineSeed()); setTimelineMode(mode); }
   function searchTag(value: string) { setPage('search'); setSearch(''); setTag(value); window.scrollTo({ top: 0 }); }
@@ -200,19 +210,31 @@ export default function App() {
     requestAnimationFrame(() => textareaRef.current?.setSelectionRange(cursor, cursor));
   }
   async function submit(event: FormEvent) {
-    event.preventDefault(); if (!body.trim() || saving || !posts || loadError) return;
+    event.preventDefault(); if ((!body.trim() && !draftImages.length) || composerDisabled) return;
     setSaving(true); setComposeError(undefined);
     try {
-      await createPost(body, initialAnger);
-      setBody(''); setInitialAnger('0'); setComposerOpen(false); setTagPickerOpen(false); setTagQuery(''); setPage('timeline'); setTimelineMode('newest'); setTag(''); setSearch('');
+      await createPost(body, initialAnger, db, draftImages as PreparedImage[]);
+      setBody(''); setDraftImages([]); setInitialAnger('0'); setComposerOpen(false); setTagPickerOpen(false); setTagQuery(''); setPage('timeline'); setTimelineMode('newest'); setTag(''); setSearch('');
       requestAnimationFrame(() => window.scrollTo({ top: 0 }));
       notify('吐き出せました。おつかれさま。');
     } catch (error) { setComposeError(friendlyError(error)); } finally { setSaving(false); }
   }
   async function saveEdit(event: FormEvent) {
-    event.preventDefault(); if (!editing || mutationBusy || !editBody.trim()) return;
+    event.preventDefault(); if (!editing || mutationBusy || imageBusy || (!editBody.trim() && !editImages.length)) return;
     setMutationBusy(true);
-    try { await updatePost(editing.id, editBody); setEditing(undefined); notify('日記を更新しました。'); } catch (error) { notify(friendlyError(error), true); } finally { setMutationBusy(false); }
+    try { await updatePost(editing.id, editBody, db, editImages); setEditing(undefined); setEditImages([]); notify('日記を更新しました。'); } catch (error) { notify(friendlyError(error), true); } finally { setMutationBusy(false); }
+  }
+  async function openEditor(value: Post) {
+    if (mutationBusy || backupBusy) return;
+    setMutationBusy(true);
+    try {
+      const images = await db.attachments.bulkGet(value.imageIds ?? []);
+      if (images.some(image => !image || image.postId !== value.id)) throw new Error('画像を読み込めませんでした。');
+      setEditBody(value.body); setEditImages(images as ImageItem[]); setEditing(value);
+    } catch (error) { notify(friendlyError(error), true); } finally { setMutationBusy(false); }
+  }
+  function closeEditor() {
+    if (!mutationBusy && !imageBusy && (!editDirty || window.confirm('編集内容を破棄して閉じますか？'))) { setEditing(undefined); setEditImages([]); }
   }
   async function confirmDelete() {
     if (!deleting || mutationBusy) return; setMutationBusy(true);
@@ -224,15 +246,15 @@ export default function App() {
   }
 
   const pageTitle = navItems.find(item => item.id === page)!.label;
-  const cards = visiblePosts.map((post, index) => <PostCard key={post.id} post={post} rank={page === 'ranking' ? index + 1 : undefined} onTag={searchTag} onEdit={value => { setEditBody(value.body); setEditing(value); }} onDelete={setDeleting} onError={message => notify(message, true)} />);
-  const navigation = (mobile = false) => <nav aria-label={mobile ? '下部ナビゲーション' : 'メインナビゲーション'} className={mobile ? 'bottom-nav' : 'side-nav'}>{navItems.map(({ id, label, icon: Icon }) => <button key={id} aria-label={label} aria-current={page === id ? 'page' : undefined} className={page === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={mobile ? 23 : 22} strokeWidth={page === id ? 2.3 : 1.8} /><span>{mobile && id === 'ranking' ? 'ランキング' : label}</span>{!mobile && page === id && <span className="nav-dot" />}</button>)}</nav>;
+  const cards = visiblePosts.map((post, index) => <PostCard key={post.id} post={post} rank={page === 'ranking' ? index + 1 : undefined} onTag={searchTag} onEdit={value => void openEditor(value)} onDelete={setDeleting} onError={message => notify(message, true)} />);
+  const navigation = (mobile = false) => <nav aria-label={mobile ? '下部ナビゲーション' : 'メインナビゲーション'} className={mobile ? 'bottom-nav' : 'side-nav'}>{navItems.map(({ id, label, icon: Icon }) => <button key={id} aria-label={label} aria-current={page === id ? 'page' : undefined} className={page === id ? 'active' : ''} disabled={backupBusy || mutationBusy || imageBusy || saving} onClick={() => navigate(id)}><Icon size={mobile ? 23 : 22} strokeWidth={page === id ? 2.3 : 1.8} /><span>{mobile && id === 'ranking' ? 'ランキング' : label}</span>{!mobile && page === id && <span className="nav-dot" />}</button>)}</nav>;
 
   return <div className="app-shell">
-    <aside className="left-sidebar"><button className="brand-button" aria-label="愚痴ったー ホーム" onClick={() => navigate('timeline')}><Brand /></button>{navigation()}<button className="primary-button sidebar-compose" onClick={compose}><Pencil size={18} /><span>愚痴をこぼす</span></button><div className="sidebar-bottom"><span className="private-badge"><LockKeyhole size={13} /> PRIVATE DIARY</span><p>今日のモヤモヤも、<br />いつか笑える思い出に。</p><div className="sidebar-profile"><span className="avatar small-avatar"><Flame size={20} /></span><div><strong>わたしの居場所</strong><span>誰にも見せない日記</span></div><ShieldCheck size={17} /></div></div></aside>
+    <aside className="left-sidebar"><button className="brand-button" aria-label="愚痴ったー ホーム" onClick={() => navigate('timeline')}><Brand /></button>{navigation()}<button className="primary-button sidebar-compose" disabled={backupBusy || mutationBusy || imageBusy} onClick={compose}><Pencil size={18} /><span>愚痴をこぼす</span></button><div className="sidebar-bottom"><span className="private-badge"><LockKeyhole size={13} /> PRIVATE DIARY</span><p>今日のモヤモヤも、<br />いつか笑える思い出に。</p><div className="sidebar-profile"><span className="avatar small-avatar"><Flame size={20} /></span><div><strong>わたしの居場所</strong><span>誰にも見せない日記</span></div><ShieldCheck size={17} /></div></div></aside>
     <main className={`main-column ${page === 'timeline' ? 'is-timeline' : ''}`} id="main-content">
       <header className="main-header"><div className="mobile-brand"><Brand small /></div><div className="header-title"><h1 ref={headingRef}>{pageTitle}</h1><span>{page === 'timeline' ? 'ためこまずに、ここに置いていこう。' : page === 'search' ? 'あの日の気持ちを、見つける。' : page === 'ranking' ? 'あのときは、本当に腹が立った。' : 'あなたに合った、心地よい場所に。'}</span></div></header>
+      {page !== 'settings' && <BackupReminder hasData={allPosts.length > 0} oldestPostAt={allPosts[allPosts.length - 1]?.createdAt} onOpenSettings={() => navigate('settings')} />}
       {page === 'search' && <section className="search-panel"><div className="search-box"><Search size={20} /><input aria-label="日記を検索" placeholder="言葉や #タグで探す" value={search} onChange={event => setSearch(event.target.value)} /><button className="icon-button" aria-label="検索をクリア" onClick={() => { setSearch(''); setTag(''); }} disabled={!search && !tag}><X size={17} /></button></div><p>複数の言葉で絞り込み。#タグは完全一致で検索します。</p>{stats.tags.length > 0 && <div className="filter-tags">{stats.tags.map(value => <button key={normalizeTag(value.label)} className={tag === value.label ? 'selected' : ''} onClick={() => setTag(tag === value.label ? '' : value.label)}>#{value.label}<span>{value.count}</span></button>)}</div>}</section>}
-      {page === 'ranking' && <section className="ranking-banner"><span className="ranking-icon"><Trophy size={27} strokeWidth={1.5} /></span><div><span className="eyebrow">MY ANGER HALL OF FAME</span><h2>いつかの、笑い話のタネ。</h2><p>イライラ値が多い順に、あの日を振り返る。</p></div></section>}
       {page !== 'settings' && <>
         <div className={`feed-toolbar ${page === 'timeline' ? 'timeline-toolbar' : ''}`}>
           {page === 'timeline' ? <div className="feed-tabs timeline-tabs" role="tablist" aria-label="タイムラインの並び順" onKeyDown={event => {
@@ -255,12 +277,13 @@ export default function App() {
         <section className="setting-section"><span className="section-kicker">APPEARANCE</span><h2>好きな明るさで。</h2><p>夜のひとりごとも、目にやさしく。</p><div className="theme-options">{([{ value: 'light', label: 'ライト', icon: Sun }, { value: 'dark', label: 'ダーク', icon: Moon }, { value: 'system', label: '端末に合わせる', icon: Monitor }] as const).map(({ value, label, icon: Icon }) => <button key={value} className={theme === value ? 'selected' : ''} aria-pressed={theme === value} onClick={() => setTheme(value)}><Icon size={23} /><span>{label}</span>{theme === value && <Check size={14} />}</button>)}</div></section>
         <section className="setting-section"><span className="section-kicker">YOUR DATA</span><h2>日記は、この端末の中に。</h2><div className="setting-info"><ShieldCheck size={22} /><div><strong>外部へ送信しません</strong><p>投稿はこのブラウザのIndexedDBに保存します。アカウント・広告・アクセス解析はありません。</p></div></div><div className="setting-info"><LockKeyhole size={22} /><div><strong>保存について知っておいてほしいこと</strong><p>日記自体は暗号化されていません。この端末を使える人からは閲覧できます。ブラウザの閲覧データ削除や端末の紛失で失われるため、大切な記録の唯一の保管先にはしないでください。</p></div></div><div className="storage-row"><span>保存領域の保護</span><span className={persistent ? 'green-text' : 'muted'}>{persistent ? '許可済み' : '未許可・未対応'}</span></div><button className="secondary-button" onClick={() => void requestPersistence()} disabled={persistent || persistenceBusy || !navigator.storage?.persist}>{persistenceBusy ? '確認中…' : persistent ? '保護が許可されています' : '保存領域の保護をリクエスト'}</button><p className="setting-note">ブラウザによっては許可されません。保護が有効でも、手動で削除したデータは戻せません。</p></section>
         <section className="setting-section"><span className="section-kicker">TAKE IT WITH YOU</span><h2>ホーム画面に、ひとりごとの場所。</h2><p>{offlineReady ? 'オフライン用の準備ができました。' : '初回はオンラインで開き、オフライン用ファイルの準備をお待ちください。'} 通信がなくても投稿・検索・閲覧ができます。</p>{installEvent ? <button className="secondary-button" onClick={async () => { try { await installEvent.prompt(); await installEvent.userChoice; setInstallEvent(undefined); } catch { notify('ブラウザのメニューからホーム画面に追加してください。'); } }}><Download size={16} />ホーム画面に追加</button> : <div className="install-guide"><strong>iPhone / Safari</strong><p>共有メニュー →「ホーム画面に追加」</p><strong>Android / Chrome</strong><p>メニュー →「ホーム画面に追加」または「アプリをインストール」</p></div>}</section>
-        <section className="setting-section upcoming"><span className="section-kicker">COMING NEXT</span><h2>少しずつ、育てています。</h2><p>画像添付・端末内圧縮、暗号化バックアップと安全な復元は、次の開発段階で追加します。現在はバックアップできません。</p><span className="version-badge">v0.1.0 · はじまりのバージョン</span></section>
+        <BackupSettings onBusyChange={setBackupBusy} onDirtyChange={setBackupDirty} />
+        <span className="version-badge">v0.2.0</span>
       </div>}
     </main>
     <aside className="right-sidebar"><div className="privacy-label"><span className="status-dot" /><LockKeyhole size={12} />誰にも見せない、わたしの場所</div><section className="stats-panel"><div className="panel-heading"><h2>あなたの記録</h2><span>MY LITTLE LOG</span></div><div className="stats-primary"><div><span>吐き出したひとりごと</span><strong>{numberLabel(allPosts.length)}<small>件</small></strong></div><span className="stats-icon"><Pencil size={21} strokeWidth={1.5} /></span></div><div className="stats-bottom"><div><span><AngerIcon size={13} /> 累計イライラ</span><strong>{numberLabel(stats.anger)}<small>回</small></strong></div><div><span><Sun size={13} /> 今日の投稿</span><strong>{numberLabel(stats.today)}<small>件</small></strong></div></div></section><section className="tag-panel"><div className="panel-heading"><h2>よく使うタグ</h2><Hash size={17} /></div>{stats.tags.length ? <div className="sidebar-tags">{stats.tags.slice(0, 8).map(value => <button key={normalizeTag(value.label)} onClick={() => searchTag(value.label)}>#{value.label}<span>{value.count}</span></button>)}</div> : <p className="muted tag-empty">あなたの気持ちに、目印を。<br />投稿に #タグ をつけてみよう。</p>}</section><section className="breather-card"><div className="breather-top"><Leaf size={15} /><span>ひと息メモ</span><span>01</span></div><SteamArt quiet /><h2>怒った日も、<br />ちゃんと生きた日。</h2><p>書いて、少しだけ手放して。<br />あとは、あったかいものでも。</p><span className="breather-line" /></section><div className="right-footer"><LockKeyhole size={13} /><p>気持ちはサーバーに送りません。<br />あなたの端末に、そっと保存します。</p></div><span className="made-for-you">余白を、こころに。<span>愚痴ったー © 2026</span></span></aside>
-    {navigation(true)}<button className="floating-compose" onClick={compose} aria-label="愚痴をこぼす"><Plus size={26} /></button>
-    {composerOpen && <Dialog title="愚痴をこぼす" className="compose-dialog" closeDisabled={saving} onClose={closeComposer} onEscape={() => { if (!saving) { if (tagPickerOpen) closeTagPicker(); else closeComposer(); } }} action={<button className="primary-button submit-post" form="new-post-form" type="submit" disabled={composerDisabled || !body.trim()}>{saving ? '保存中…' : '吐き出す'}<ArrowUpRight size={17} /></button>}>
+    {navigation(true)}<button className="floating-compose" disabled={backupBusy || mutationBusy || imageBusy} onClick={compose} aria-label="愚痴をこぼす"><Plus size={26} /></button>
+    {composerOpen && <Dialog title="愚痴をこぼす" className="compose-dialog" closeDisabled={saving || imageBusy} onClose={closeComposer} onEscape={() => { if (!saving && !imageBusy) { if (tagPickerOpen) closeTagPicker(); else closeComposer(); } }} action={<button className="primary-button submit-post" form="new-post-form" type="submit" disabled={composerDisabled || (!body.trim() && !draftImages.length)}>{saving ? '保存中…' : '吐き出す'}<ArrowUpRight size={17} /></button>}>
       <form id="new-post-form" className="composer" onSubmit={submit}>
         <div className="composer-top">
           <div className="avatar"><Flame size={24} strokeWidth={1.7} /></div>
@@ -269,6 +292,7 @@ export default function App() {
             <textarea id="new-post" ref={textareaRef} placeholder="いま、何にモヤモヤしてる？" value={body} onChange={event => { setBody(event.target.value); setComposeError(undefined); rememberDraftSelection(); }} onSelect={rememberDraftSelection} onBlur={rememberDraftSelection} rows={7} disabled={composerDisabled} autoFocus />
           </div>
         </div>
+        <ImagePicker images={draftImages} onChange={images => { setDraftImages(images); setComposeError(undefined); }} disabled={composerDisabled} onBusyChange={setImageBusy} onError={setComposeError} />
         <div className="composer-bottom"><div className="composer-tools">
           <button ref={tagButtonRef} type="button" className={`icon-button ${tagPickerOpen ? 'tag-picker-active' : ''}`} aria-label="タグを選ぶ" title="タグを選ぶ" aria-expanded={tagPickerOpen} aria-controls="composer-tag-picker" disabled={composerDisabled} onClick={() => { rememberDraftSelection(); setTagQuery(''); setTagPickerOpen(open => !open); }}><Hash size={21} /></button><span className="tool-divider" />
           <button type="button" className="draft-anger" aria-label="投稿前のイライラを1増やす" disabled={composerDisabled} onClick={() => setInitialAnger(incrementAnger(initialAnger))}><AngerIcon size={18} /><span>{numberLabel(initialAnger)}</span></button><span className="draft-label">いまのイライラ</span>
@@ -288,8 +312,8 @@ export default function App() {
       </form>
     </Dialog>}
     {notice && <div className={`toast ${notice.error ? 'toast-error' : ''}`} role={notice.error ? 'alert' : 'status'}>{notice.error ? <WifiOff size={18} /> : <Check size={18} />}<span>{notice.message}</span><button aria-label="通知を閉じる" className="icon-button" onClick={() => setNotice(undefined)}><X size={16} /></button></div>}
-    {needRefresh && <div className="update-banner"><span>新しいバージョンを使えます。{dirty ? '下書きを保存してから更新できます。' : ''}</span><button disabled={dirty || saving || mutationBusy} onClick={() => void updateServiceWorker(true)}>更新する</button></div>}
-    {editing && <Dialog title="ひとりごとを編集" onClose={() => { if (!mutationBusy) { if (editBody === editing.body || window.confirm('編集内容を破棄して閉じますか？')) setEditing(undefined); } }}><form onSubmit={saveEdit}><label className="sr-only" htmlFor="edit-post">今の気持ち</label><textarea ref={editRef} id="edit-post" className="edit-textarea" value={editBody} onChange={event => setEditBody(event.target.value)} rows={6} disabled={mutationBusy} autoFocus /><p className="setting-note">投稿日時とイライラ値はそのまま。タグも更新されます。</p><div className="dialog-actions"><button type="submit" className="primary-button" disabled={mutationBusy || !editBody.trim()}>{mutationBusy ? '保存中…' : '保存する'}<Check size={17} /></button></div></form></Dialog>}
+    {needRefresh && <div className="update-banner"><span>新しいバージョンを使えます。{dirty ? '下書きを保存してから更新できます。' : ''}</span><button disabled={dirty || saving || mutationBusy || imageBusy || backupBusy} onClick={() => void updateServiceWorker(true)}>更新する</button></div>}
+    {editing && <Dialog title="ひとりごとを編集" onClose={closeEditor} closeDisabled={mutationBusy || imageBusy}><form onSubmit={saveEdit}><label className="sr-only" htmlFor="edit-post">今の気持ち</label><textarea ref={editRef} id="edit-post" className="edit-textarea" value={editBody} onChange={event => setEditBody(event.target.value)} rows={6} disabled={mutationBusy || imageBusy} autoFocus /><ImagePicker images={editImages} onChange={setEditImages} disabled={mutationBusy || imageBusy} onBusyChange={setImageBusy} onError={message => notify(message, true)} /><p className="setting-note">投稿日時とイライラ値はそのまま。タグも更新されます。</p><div className="dialog-actions"><button type="submit" className="primary-button" disabled={mutationBusy || imageBusy || (!editBody.trim() && !editImages.length)}>{mutationBusy ? '保存中…' : '保存する'}<Check size={17} /></button></div></form></Dialog>}
     {deleting && <Dialog title="このひとりごとを削除しますか？" onClose={() => { if (!mutationBusy) setDeleting(undefined); }}><p className="delete-explanation">削除した日記は元に戻せません。</p><blockquote className="delete-preview">{deleting.body}</blockquote><div className="dialog-actions"><button className="secondary-button" disabled={mutationBusy} onClick={() => setDeleting(undefined)}>キャンセル</button><button className="danger-button" disabled={mutationBusy} onClick={() => void confirmDelete()}>{mutationBusy ? '削除中…' : '削除する'}</button></div></Dialog>}
   </div>;
 }

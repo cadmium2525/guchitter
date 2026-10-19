@@ -3,7 +3,7 @@ import type { Post } from './posts';
 import { createTimelineSeed, orderTimeline } from './timeline';
 
 function post(id: string, createdAt = 1): Post {
-  return { id, createdAt, updatedAt: createdAt, body: id, tags: [], angerCount: '0' };
+  return { id, createdAt, updatedAt: createdAt, body: id, tags: [], imageIds: [], angerCount: '0' };
 }
 
 const posts = Array.from({ length: 24 }, (_, index) => post(`post-${index}`, index));
