@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.npm-cache/
+.playwright-browsers/
+test-results/
+playwright-report/
+*.local
+*.log
+.env*
+!.env.example

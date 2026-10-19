@@ -1,0 +1,80 @@
+# 愚痴ったー
+
+「過去の怒りを、後から笑える思い出にする」ための、端末内保存の愚痴日記 PWA です。React・TypeScript・Vite・Tailwind CSS・Dexie.js・IndexedDB・vite-plugin-pwa・Lucide React を使います。ユーザー登録、バックエンド、有料 API はありません。
+
+## 初回の実装範囲
+
+- スマートフォン向けの日本語タイムライン、下部ナビゲーション、投稿画面
+- テキスト投稿と複数ハッシュタグ
+- 投稿の編集、確認画面を経由した削除
+- 炎ボタンによる怒りカウント。10 進文字列で加算し、JavaScript の安全な整数の上限で打ち切りません
+- Dexie.js を使った IndexedDB 保存と再読み込み後の表示
+- 本文の全文検索、複数語の AND 検索、`#タグ` の完全一致検索、タグボタンでの絞り込み
+- 新しい順・古い順・イライラ順、イライラランキング、今日の投稿の表示
+- ライト・ダーク・端末に合わせるテーマ設定
+- PWA の manifest とオフラインキャッシュ、インストール案内、下書きがある間の更新操作の保留
+- ブラウザーに保存領域の保護を要求する設定。許可はブラウザーの判断に依存します
+- GitHub Pages 用のビルド・公開ワークフロー
+
+画像添付・WebP 圧縮、暗号化バックアップ・復元、バックアップのリマインダーは後続段階です。**現段階では完全バックアップできません。重要な日記の唯一の保存先としては使わないでください。** 実装計画とデータ形式は [設計書](docs/ARCHITECTURE.md) に記載しています。
+
+## 開発
+
+Node.js 22.20 以上の 22 系、または 24.12 以上と npm を使用します。
+
+```sh
+npm install
+npm run dev
+```
+
+```sh
+npm run check
+npm test
+npm run build
+npm run preview
+```
+
+`check` は型チェック、`test` は基本テスト、`build` は公開用 `dist/` の生成、`preview` はビルド結果のローカル確認です。依存関係を固定して再現するときは `npm ci` を使います。`preview` は本番用サーバーではありません。
+
+PWA の Service Worker は公開用ビルドで確認します。最初のオンライン読み込みとキャッシュの準備が済んでからオフライン起動を確認してください。端末から HTTP の開発サーバーを開くだけでは、HTTPS を必要とする PWA 機能の確認になりません。
+
+ブラウザー E2E テストは次のように実行します。PowerShell では、ブラウザーの配置先をインストール時とテスト時の両方で指定してください。
+
+```powershell
+$env:PLAYWRIGHT_BROWSERS_PATH = "$PWD/.playwright-browsers"
+npx playwright install chromium webkit
+npm run test:e2e
+```
+
+テストが本番ビルドと `127.0.0.1:4173` のプレビューサーバーを起動します。このポートを空けて実行してください。Playwright のブラウザー更新時は対応するバイナリを再インストールします。詳細は [Playwright 公式のブラウザー管理](https://playwright.dev/docs/browsers) を参照してください。
+
+## 保存とプライバシー
+
+投稿内容はこのブラウザーの IndexedDB に保存します。日記の送信先、解析サービス、外部フォント、ログイン処理は設けません。初回表示や更新時には、GitHub Pages から HTML・JavaScript・画像などのアプリ資材を取得します。ホスティング側には一般的なアクセス情報が残り得ますが、日記本文・タグ・怒りカウントを送信する設計にはしません。
+
+**IndexedDB の中身は平文です。** 端末のロックやブラウザーのアクセス制御を使ってください。将来の AES-GCM バックアップは出力ファイルを暗号化する機能で、端末内データの暗号化とは別です。サイトデータの削除、プライベートブラウズ、容量不足、OS・ブラウザーによる保存領域の削除などで失われる可能性があります。端末間の自動同期はありません。
+
+IndexedDB は URL のパス単位ではなくオリジン単位で隔離されます。`https://owner.github.io/a/` と `/b/` は同じオリジンです。他の公開アプリと同居する場合、別リポジトリというだけでは日記の隔離を保証できません。日記専用の GitHub Pages オリジンを使う構成を推奨します。
+
+## GitHub Pages
+
+公開先リポジトリは [cadmium2525/guchitter](https://github.com/cadmium2525/guchitter) です。配備後のアプリ URL は `https://cadmium2525.github.io/guchitter/` です。
+
+公開するのはアプリのソースと静的ビルドです。端末内の日記データやバックアップファイルをリポジトリに追加しないでください。費用 0 円の構成は GitHub Free の公開リポジトリと GitHub Pages を前提とし、独自ドメインや有料サービスは必要ありません。公開サイトを開く利用者には GitHub アカウントは不要です。
+
+1. このプロジェクトを公開 GitHub リポジトリの `main` ブランチへ保存します。
+2. リポジトリの **Settings → Pages → Build and deployment → Source** を **GitHub Actions** にします。
+3. `main` への push または Actions の手動実行で、型チェック・テスト・ビルドが通った成果物を公開します。
+4. 通常のプロジェクトサイトは `https://<owner>.github.io/<repo>/` です。ワークフローはリポジトリ名から `VITE_BASE_PATH=/<repo>/` を設定します。`<owner>.github.io` というリポジトリでは `/` になります。
+
+独自ドメインでルート配信する場合は、ワークフローのベースパス設定を `/` に変更してください。既存の日記はオリジンを変えると自動移行されません。公開済み URL や実際の GitHub Pages 配備の成功は、このファイルを作成しただけでは確認されません。
+
+GitHub Pages の設定は [GitHub 公式ドキュメント](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)、Vite の配信パスは [Vite 公式ガイド](https://vite.dev/guide/static-deploy#github-pages) を参照してください。
+
+## 動作確認
+
+2026 年 10 月 19 日時点で、型チェック、基本テスト 22 件、本番ビルド、Chrome／WebKit の E2E 15 件が通過しました。GitHub Pages 相当のサブパスについても、オフライン動作・manifest の追加 4 件が通過しています。実行環境と再現手順は [検証記録](docs/VERIFICATION.md) を参照してください。配備状況は [GitHub Actions](https://github.com/cadmium2525/guchitter/actions/workflows/deploy.yml) で確認できます。
+
+自動テストとデスクトップ上のブラウザー確認だけでは、iPhone Safari・Android Chrome の動作確認は完了しません。実機の確認手順と未実施項目は [実機テスト表](docs/DEVICE-TESTS.md) にまとめています。
+
+今後の実装は、各段階で型チェック・ビルド・基本テストを通してから進めます。
